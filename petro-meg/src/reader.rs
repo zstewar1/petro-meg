@@ -55,8 +55,8 @@ impl<R> MegaFileReader<R> {
     }
 
     /// Gets the files associated with the given path, if any. Otherwise returns an empty slice.
-    pub fn get_files(&self, path: &Path) -> &[File] {
-        self.files.get(path).map_or(&[], AsRef::as_ref)
+    pub fn get_files(&self, path: &Path) -> Option<&[File]> {
+        self.files.get(path).map(AsRef::as_ref)
     }
 
     /// Get a reader which reads the file with the given index at the specified path.
