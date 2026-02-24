@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::exit;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use petro_meg::path::MegPathBuf;
 use petro_meg::reader::MegaFileReader;
 
 /// Utility for working with Petroglyph MEGA files.
@@ -77,14 +78,13 @@ struct ExtractCmd {
     out_dir: Option<PathBuf>,
     /// Specifies the destination file to extract to. Can only be used when extracting a single
     /// file.
+    ///
+    /// When --out is used, no directories will be created.
     #[arg(long, conflicts_with = "out_dir")]
     out: Option<PathBuf>,
     /// Specific files to extract.
-    ///
-    /// These must exactly match the case of the file names in the MEGA file regardless of the case
-    /// mode.
     #[arg(conflicts_with = "all")]
-    files: Vec<PathBuf>,
+    files: Vec<MegPathBuf>,
     /// If true, extract all files.
     #[arg(long, conflicts_with = "files")]
     all: bool,
@@ -96,11 +96,6 @@ struct ExtractCmd {
     /// on other systems, it can be helpful to force file names into a consistent case.
     #[arg(long, conflicts_with = "out", value_enum, default_value_t = NameCaseMode::Keep)]
     case: NameCaseMode,
-    /// Selects which file index for a given path to extract. This can be helpful for improperly
-    /// formed MEGA files which contain multiple files with the same path. Applies to all paths. If
-    /// a path does not have a file with the specified index, that path will be skipped.
-    #[arg(long, default_value_t = 0)]
-    index: usize,
 }
 
 fn main() {
@@ -114,12 +109,22 @@ fn main() {
 /// Executes the list command on a MEGA file.
 fn run_list(cmd: &ListCmd) {
     let reader = open_reader(&cmd.reader);
-    for (path, files) in reader.files() {
-        print!("{}", path.display());
-        for (idx, file) in files.iter().enumerate() {
-            print!("  [{idx}]: {}", file.size());
+    for (path, files) in reader.iter() {
+        print!("{}", path);
+        if files.len() == 0 {
+            println!(":  <No Files>");
+        } else if files.len() == 1 {
+            println!(":  {} bytes", files[0].size());
+        } else {
+            println!();
+            for (idx, file) in files.iter().enumerate() {
+                println!(
+                    "    [{idx}] {}:  {} bytes",
+                    file.original_name(),
+                    file.size()
+                );
+            }
         }
-        println!();
     }
 }
 
@@ -129,50 +134,40 @@ fn run_extract(cmd: ExtractCmd) {
 
     let files_to_extract: Vec<_> = if cmd.all {
         reader
-            .files()
+            .iter()
             .filter_map(|(path, files)| {
-                if files.get(cmd.index).is_some() {
-                    Some(path.to_path_buf())
-                } else {
-                    if files.is_empty() {
-                        eprintln!(
-                            "Skipping path {} which does not have any files.",
-                            path.display()
-                        );
-                    } else {
-                        eprintln!(
-                            "Skipping path {} which does not have a file with index {}.",
-                            path.display(),
-                            cmd.index
-                        );
-                    }
+                if files.is_empty() {
+                    eprintln!("Skipping path {path} which does not have any associated files");
                     None
+                } else {
+                    Some(path)
                 }
             })
             .collect()
     } else if cmd.files.len() > 0 {
         cmd.files
             .into_iter()
-            .filter_map(
-                |path| match reader.get_files(&path).map(|files| files.get(cmd.index)) {
-                    None => {
-                        eprintln!("Path {} not found in the MEGA file.", path.display());
-                        None
-                    }
-                    Some(None) => {
-                        eprintln!(
-                            "Skipping path {} which does not have a file with index {}.",
-                            path.display(),
-                            cmd.index
-                        );
-                        None
-                    }
-                    Some(Some(_)) => Some(path),
-                },
-            )
+            .filter_map(|path| match reader.get_named(&path) {
+                None => {
+                    eprintln!(
+                        "Skipping path {}; Path was not found in the MEGA file.",
+                        path
+                    );
+                    None
+                }
+                Some(&[]) => {
+                    eprintln!(
+                        "Skipping path {} which does not have any associated files",
+                        path
+                    );
+                    None
+                }
+                Some(_) => Some(path.as_ref()),
+            })
             .collect()
     } else {
-        Vec::new()
+        eprintln!("Must specify either a list of MEGA file paths to extract or --all");
+        exit(1);
     };
 
     if files_to_extract.is_empty() {
@@ -180,21 +175,13 @@ fn run_extract(cmd: ExtractCmd) {
         exit(2);
     }
 
-    let transform_to_output_path = |path: &PathBuf| {
-        let mut output_path = if cmd.flatten {
-            match path.file_name() {
-                None => {
-                    eprintln!("Unexpected path {}, unable to flatten", path.display());
-                    exit(1);
-                }
-                Some(name) => name.into(),
-            }
-        } else {
-            path.to_path_buf()
-        };
-        cmd.case.convert(&mut output_path);
-        output_path
-    };
+    if let Some(out) = cmd.out {
+        if files_to_extract.len() > 1 {
+            eprintln!("--out can only be used when extracting a single file");
+            exit(1);
+        }
+        //let
+    }
 
     let output_paths: Vec<_> = match (cmd.out, cmd.out_dir) {
         // No outputs specified, write to the PWD with appropriate case transform and flattening.

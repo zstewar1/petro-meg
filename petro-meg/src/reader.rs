@@ -1,14 +1,15 @@
 use std::collections::BTreeMap;
 use std::io::{self, Read, Seek};
-use std::path::{Path, PathBuf};
 
 use byteorder::{LE, ReadBytesExt as _};
 use tracing::{instrument, warn};
 
+use crate::path::{MegPath, MegPathBuf};
+
 /// Reads contents from a Mega file.
 pub struct MegaFileReader<R> {
     /// File listing for the file, pulled from the file names and files table.
-    files: BTreeMap<PathBuf, Vec<File>>,
+    files: BTreeMap<MegPathBuf, Vec<File>>,
     /// Source reader to pull file contents from.
     source: R,
 }
@@ -36,31 +37,37 @@ impl<R> MegaFileReader<R> {
     /// Get an iterator over file names contained in this MegaFile.
     ///
     /// Note that the mega file could contain file names that don't contain any actual file entries.
-    pub fn file_names(
+    pub fn names(
         &self,
-    ) -> impl Iterator<Item = &Path> + DoubleEndedIterator + ExactSizeIterator {
+    ) -> impl Iterator<Item = &MegPath> + DoubleEndedIterator + ExactSizeIterator {
         self.files.keys().map(|pb| pb.as_ref())
+    }
+
+    /// Get an iterator over file entries contained in this MegaFile.
+    pub fn files(&self) -> impl Iterator<Item = &File> + DoubleEndedIterator {
+        self.files.values().flatten()
     }
 
     /// Get an iterator over file names contained in this MegaFile and the entries associated with
     /// each name.
     ///
     /// Note that the mega file could contain file names that don't contain any actual file entries.
-    pub fn files(
+    pub fn iter(
         &self,
-    ) -> impl Iterator<Item = (&Path, &[File])> + DoubleEndedIterator + ExactSizeIterator {
+    ) -> impl Iterator<Item = (&MegPath, &[File])> + DoubleEndedIterator + ExactSizeIterator {
         self.files
             .iter()
             .map(|(pb, files)| (pb.as_ref(), files.as_ref()))
     }
 
-    /// Gets the files associated with the given path, if any. Otherwise returns an empty slice.
-    pub fn get_files(&self, path: &Path) -> Option<&[File]> {
+    /// Gets the files associated with the given path, if any. If there are no files, returns an
+    /// empty slice. If the path does not exist, returns none.
+    pub fn get_named(&self, path: &MegPath) -> Option<&[File]> {
         self.files.get(path).map(AsRef::as_ref)
     }
 
     /// Get a reader which reads the file with the given index at the specified path.
-    pub fn get_reader(&mut self, path: &Path, entry_idx: usize) -> Option<FileReader<&mut R>> {
+    pub fn get_reader(&mut self, path: &MegPath, entry_idx: usize) -> Option<FileReader<&mut R>> {
         let entries = self.files.get(path)?;
         let entry = entries.get(entry_idx)?;
         Some(FileReader {
@@ -75,6 +82,12 @@ impl<R> MegaFileReader<R> {
 /// Entry for a file read from the mega file files table.
 #[derive(Clone)]
 pub struct File {
+    /// The original name of the file.
+    ///
+    /// MEGA paths are case-insensitive, so the map entry containing this file might differ by case
+    /// from the name the file was actually stored under. This is the original name, preserving
+    /// case.
+    original_name: MegPathBuf,
     /// Size of the file.
     size: u32,
     /// Index of the start of the file.
@@ -82,6 +95,15 @@ pub struct File {
 }
 
 impl File {
+    /// Get the original name of the file.
+    ///
+    /// MEGA paths are case-insensitive, so the map entry containing this file might differ by case
+    /// from the name the file was actually stored under. This is the original name, preserving
+    /// case.
+    pub fn original_name(&self) -> &MegPath {
+        &self.original_name
+    }
+
     /// Gets the size of this file.
     pub fn size(&self) -> u32 {
         self.size
@@ -141,7 +163,7 @@ where
 ///
 /// This operation is the same across Mega file versions. For v3, the filenames might need to be
 /// decrypted first.
-fn parse_filenames(source: &mut impl Read, num_filenames: usize) -> io::Result<Vec<PathBuf>> {
+fn parse_filenames(source: &mut impl Read, num_filenames: usize) -> io::Result<Vec<MegPathBuf>> {
     // File name table records follow this format, per petrolution.net:
     //   +0000h  length        uint16   ; Length of the filename, in characters
     //   +0004h  name          length   ; The ASCII filename
@@ -150,19 +172,13 @@ fn parse_filenames(source: &mut impl Read, num_filenames: usize) -> io::Result<V
         let length = source.read_u16::<LE>()? as usize;
         let mut buf = vec![0u8; length];
         source.read_exact(&mut buf[..])?;
-        let name = match String::from_utf8(buf) {
-            Ok(str) if str.is_ascii() => str,
-            Ok(str) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("File name must be ASCII, got {str}"),
-                ));
-            }
+        let name = match MegPathBuf::from_vec(buf) {
+            Ok(name) => name,
             Err(e) => {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, e));
             }
         };
-        result.push(PathBuf::from(name));
+        result.push(name);
     }
     Ok(result)
 }
@@ -173,13 +189,15 @@ fn parse_filenames(source: &mut impl Read, num_filenames: usize) -> io::Result<V
 /// Caller is responsible for ensuring that the reader is at the start of the files table.
 fn parse_files_v1_v2(
     source: &mut impl Read,
-    names: Vec<PathBuf>,
+    names: Vec<MegPathBuf>,
     num_files: usize,
-) -> io::Result<BTreeMap<PathBuf, Vec<File>>> {
-    // We start by building a parallel vector to the names vector, then zip them into a map later.
-    // This lets us handle multiple entries mapping to the same name without cloning the names. Is
-    // this actually better? Maybe?
-    let mut entry_list = vec![Vec::with_capacity(1); names.len()];
+) -> io::Result<BTreeMap<MegPathBuf, Vec<File>>> {
+    let mut res: BTreeMap<MegPathBuf, Vec<File>> = BTreeMap::new();
+    // Pre-insert names to ensure that even if we have no files for a name, it is preserved in the
+    // header info.
+    for name in &names {
+        res.entry(name.clone()).or_default();
+    }
 
     // Per petrolution.net, V1 and V2 files tables have this format:
     //   +0000h  crc           uint32   ; CRC-32 of the filename
@@ -212,16 +230,20 @@ fn parse_files_v1_v2(
             Some(name) => name,
         };
 
-        let crc = crc32fast::hash(name.as_os_str().as_encoded_bytes());
+        let crc = crc32fast::hash(name.as_bytes());
         if crc != expected_crc {
             warn!(
-                "File entry at index {idx} with name {name:?} expected CRC {expected_crc:08X} but \
-                the actual CRC was {crc:08X}"
+                "File entry at index {idx} with name {name:?} expected CRC 0x{expected_crc:08X} \
+                but the actual CRC was 0x{crc:08X}"
             );
         }
 
-        entry_list[name_idx].push(File { size, start });
+        res.get_mut(name).unwrap().push(File {
+            original_name: name.clone(),
+            size,
+            start,
+        })
     }
 
-    Ok(names.into_iter().zip(entry_list.into_iter()).collect())
+    Ok(res)
 }
