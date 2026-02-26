@@ -5,4 +5,6 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.5.60", features = ["derive"] }
+globset = "0.4.18"
 petro-meg = { version = "0.1.0", path = "../petro-meg" }
+regex = "1.12.3"

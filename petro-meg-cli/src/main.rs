@@ -1,11 +1,6 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::process::exit;
+use clap::{Parser, Subcommand, ValueEnum};
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
-use petro_meg::parse_v1;
-use petro_meg::parser::{File, MegParseError};
-use petro_meg::path::MegPathBuf;
+use crate::read::{ExtractCmd, ListCmd};
 
 mod read;
 
@@ -33,11 +28,10 @@ enum Commands {
     Extract(ExtractCmd),
 }
 
-
 fn main() {
     let args = Cli::parse();
     match args.command {
-        Commands::List(ref cmd) => read::run_list(cmd),
-        Commands::Extract(cmd) => read::run_extract(cmd),
+        Commands::List(cmd) => cmd.run(),
+        Commands::Extract(cmd) => cmd.run(),
     }
 }
