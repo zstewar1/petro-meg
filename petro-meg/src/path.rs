@@ -3,6 +3,7 @@
 use std::borrow::{Borrow, BorrowMut};
 use std::cmp::Ordering;
 use std::fmt;
+use std::hash::Hash;
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
 
@@ -170,6 +171,20 @@ impl Ord for MegPath {
     }
 }
 
+impl Hash for MegPath {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let mut first = true;
+        for component in self.components() {
+            if !first {
+                // Normalize all path separators.
+                state.write_u8(b'\\');
+            }
+            first = false;
+            component.hash(state);
+        }
+    }
+}
+
 impl AsRef<str> for MegPath {
     fn as_ref(&self) -> &str {
         self.as_str()
@@ -319,6 +334,19 @@ impl PartialEq<Component> for str {
     }
 }
 
+impl Hash for Component {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        const BLOCK_SIZE: usize = 64;
+        let mut buf = [0u8; BLOCK_SIZE];
+        for chunk in self.0.chunks(BLOCK_SIZE) {
+            let lower = &mut buf[0..chunk.len()];
+            lower.copy_from_slice(chunk);
+            lower.make_ascii_lowercase();
+            state.write(lower);
+        }
+    }
+}
+
 impl PartialOrd for Component {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -327,15 +355,37 @@ impl PartialOrd for Component {
 
 impl Ord for Component {
     fn cmp(&self, other: &Self) -> Ordering {
-        for (&lhs, &rhs) in self.0.iter().zip(other.0.iter()) {
-            match lhs.to_ascii_lowercase().cmp(&rhs.to_ascii_lowercase()) {
-                Ordering::Equal => {}
-                other => return other,
+        const BLOCK_SIZE: usize = 64;
+        let mut lhs_buf = [0u8; BLOCK_SIZE];
+        let mut rhs_buf = [0u8; BLOCK_SIZE];
+        let mut lhs_iter = self.0.chunks(BLOCK_SIZE);
+        let mut rhs_iter = other.0.chunks(BLOCK_SIZE);
+        loop {
+            match (lhs_iter.next(), rhs_iter.next()) {
+                // Both ran out at the same time without finding any differences, so they're equal.
+                (None, None) => return Ordering::Equal,
+                // Left ran out first while being equal up to this point, so right is greater.
+                (None, Some(_)) => return Ordering::Less,
+                // Right ran out first while being equal up to this point, so left is greater.
+                (Some(_), None) => return Ordering::Greater,
+                (Some(lhs_chunk), Some(rhs_chunk)) => {
+                    let lhs_lower = &mut lhs_buf[0..lhs_chunk.len()];
+                    let rhs_lower = &mut rhs_buf[0..rhs_chunk.len()];
+                    lhs_lower.copy_from_slice(lhs_chunk);
+                    rhs_lower.copy_from_slice(rhs_chunk);
+                    lhs_lower.make_ascii_lowercase();
+                    rhs_lower.make_ascii_lowercase();
+                    match (*lhs_lower).cmp(rhs_lower) {
+                        // If this block was equal, try the next pair of blocks.
+                        // Note that Chunks only differes in length at the end. If there is a lenght
+                        // difference the slices won't compare equal. So if we get to Equal, either
+                        // the full slices are equal or these blocks are fully equal.
+                        Ordering::Equal => {}
+                        different => return different,
+                    }
+                }
             }
         }
-        // If they're the same up to the length of the shortest one, the shortest one comes first,
-        // so we can just compare their lengths.
-        self.len().cmp(&other.len())
     }
 }
 
@@ -407,6 +457,12 @@ impl MegPathBuf {
 
 impl_path_cmp!(@variants MegPathBuf, MegPath);
 impl_path_cmp!(@variants MegPathBuf, MegPathBuf);
+
+impl Hash for MegPathBuf {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        MegPath::hash(self, state)
+    }
+}
 
 impl Ord for MegPathBuf {
     fn cmp(&self, other: &Self) -> Ordering {
