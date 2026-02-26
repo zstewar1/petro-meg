@@ -1,6 +1,6 @@
-use tracing::{instrument, warn, debug};
+use tracing::{instrument, warn};
 
-use crate::header::{FileRecordV1V2, HeaderV1, split_off_name};
+use crate::header::{FileRecordV1V2, HeaderV2, ID2, split_off_name};
 use crate::parser::{File, MegParseError, ParseOptions};
 use crate::path::MegPath;
 
@@ -8,22 +8,24 @@ use super::{ValidatedName, record_v1v2_to_file};
 
 /// Parse a V1 MegaFile.
 #[instrument(skip(bytes))]
-pub fn parse(bytes: &[u8]) -> MegFileContentsV1<'_, 'static> {
+pub fn parse(bytes: &[u8]) -> MegFileContentsV2<'_, 'static> {
     const OPTIONS: &'static ParseOptions = &ParseOptions::new();
-    MegFileContentsV1::new(bytes, OPTIONS)
+    MegFileContentsV2::new(bytes, OPTIONS)
 }
 
 /// Parse a V1 MegaFile, with specified options.
 #[instrument(skip(bytes))]
-pub fn parse_opt<'b, 'o>(bytes: &'b [u8], options: &'o ParseOptions) -> MegFileContentsV1<'b, 'o> {
-    MegFileContentsV1::new(bytes, options)
+pub fn parse_opt<'b, 'o>(bytes: &'b [u8], options: &'o ParseOptions) -> MegFileContentsV2<'b, 'o> {
+    MegFileContentsV2::new(bytes, options)
 }
 
 /// Iterator over the contents of a MEGA file.
-pub struct MegFileContentsV1<'b, 'o> {
+pub struct MegFileContentsV2<'b, 'o> {
     options: &'o ParseOptions,
     /// Source bytes of the entire MEGA file.
     bytes: &'b [u8],
+    /// Where the header says data for the files should start. Only correct once names is Some.
+    data_start: u32,
     /// Names from the MegFile. None if we haven't read the names section yet. These are not
     /// validated.
     names: Option<Vec<ValidatedName<'b>>>,
@@ -36,7 +38,7 @@ pub struct MegFileContentsV1<'b, 'o> {
     errored_out: bool,
 }
 
-impl<'b, 'o> MegFileContentsV1<'b, 'o> {
+impl<'b, 'o> MegFileContentsV2<'b, 'o> {
     fn new(bytes: &'b [u8], options: &'o ParseOptions) -> Self {
         Self {
             options,
@@ -44,13 +46,15 @@ impl<'b, 'o> MegFileContentsV1<'b, 'o> {
             names: None,
             // Not actually the file records yet.
             file_records: bytes,
+            // Not actually the data start yet.
+            data_start: 0,
             next_index_front: 0,
             errored_out: false,
         }
     }
 }
 
-impl<'b, 'o> Iterator for MegFileContentsV1<'b, 'o> {
+impl<'b, 'o> Iterator for MegFileContentsV2<'b, 'o> {
     type Item = Result<File<'b>, MegParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -62,6 +66,7 @@ impl<'b, 'o> Iterator for MegFileContentsV1<'b, 'o> {
             self.bytes,
             &mut self.names,
             &mut self.file_records,
+            &mut self.data_start,
         ) {
             Ok(names) => names,
             Err(err) => {
@@ -83,7 +88,7 @@ impl<'b, 'o> Iterator for MegFileContentsV1<'b, 'o> {
                 self.bytes,
                 names,
                 expected_index,
-                None,
+                Some(self.data_start),
                 &record,
             ) {
                 Ok(file) => Some(Ok(file)),
@@ -119,16 +124,14 @@ fn get_names_or_start_parse<'b, 'n>(
     bytes: &'b [u8],
     names: &'n mut Option<Vec<ValidatedName<'b>>>,
     file_records: &mut &'b [u8],
+    data_start: &mut u32,
 ) -> Result<&'n [ValidatedName<'b>], MegParseError> {
     Ok(match names {
         Some(names) => names,
         None => {
-            let (n, r) = parse_header_and_names(bytes, options)?;
-            debug!(
-                "File records start offset: {}",
-                r.as_ptr() as usize - bytes.as_ptr() as usize
-            );
+            let (n, r, ds) = parse_header_and_names(bytes, options)?;
             *file_records = r;
+            *data_start = ds;
             names.insert(n)
         }
     })
@@ -139,12 +142,32 @@ fn get_names_or_start_parse<'b, 'n>(
 fn parse_header_and_names<'b>(
     full_file: &'b [u8],
     options: &ParseOptions,
-) -> Result<(Vec<ValidatedName<'b>>, &'b [u8]), MegParseError> {
+) -> Result<(Vec<ValidatedName<'b>>, &'b [u8], u32), MegParseError> {
     let (header, mut cursor) =
-        HeaderV1::split_off(full_file).ok_or(MegParseError::NotEnoughBytesForHeader {
+        HeaderV2::split_off(full_file).ok_or(MegParseError::NotEnoughBytesForHeader {
             file_size: full_file.len(),
-            min_bytes: size_of::<HeaderV1>(),
+            min_bytes: size_of::<HeaderV2>(),
         })?;
+    if header.id1 != u32::MAX || header.id2 != ID2 {
+        let err = MegParseError::InvalidFileId {
+            id1: header.id1,
+            id2: header.id2,
+        };
+        if options.validate_file_id {
+            return Err(err);
+        }
+        warn!("{err}");
+    }
+    if header.data_start as usize >= full_file.len() {
+        let err = MegParseError::InvalidDataStart {
+            file_size: full_file.len(),
+            data_start: header.data_start,
+        };
+        if options.validate_data_start {
+            return Err(err);
+        }
+        warn!("{err}");
+    }
     let mut names = Vec::with_capacity(header.num_filenames as usize);
     // Read the number of entries needed to fill the names table.
     for name_index in 0..header.num_filenames {
@@ -183,5 +206,5 @@ fn parse_header_and_names<'b>(
             num_files: header.num_files,
         },
     )?;
-    Ok((names, files))
+    Ok((names, files, header.data_start))
 }

@@ -88,6 +88,9 @@ pub(crate) struct ExtractCmd {
     /// When --out is used, no directories will be created.
     #[arg(long, conflicts_with = "out_dir")]
     out: Option<PathBuf>,
+    /// If set, print the matched files to stdout instead of writing them to disk.
+    #[arg(long, conflicts_with = "out_dir", conflicts_with = "out")]
+    print: bool,
     /// Specific files to extract.
     #[arg(conflicts_with = "all")]
     files: Vec<String>,
@@ -238,6 +241,36 @@ impl ExtractCmd {
             exit(2);
         }
 
+        if self.print {
+            use std::io::Write;
+            {
+                let mut stdout = std::io::stdout().lock();
+                for file in files_to_extract.into_values().flatten() {
+                    let res = writeln!(
+                        stdout,
+                        "{}: {} bytes:",
+                        file.path().unwrap(),
+                        file.contents().len()
+                    );
+                    if let Err(e) = res {
+                        eprintln!("Error writing file information to stdout: {e}");
+                        exit(1);
+                    }
+                    if !self.dry_run {
+                        let res = stdout
+                            .write_all(file.contents())
+                            .and_then(|()| stdout.write_all(b"\n\n"));
+                        if let Err(e) = res {
+                            eprintln!("Error writing file contents to stdout: {e}");
+                            exit(1);
+                        }
+                    }
+                }
+            }
+            println!("Done");
+            exit(0);
+        }
+
         if let Some(ref out) = self.out {
             if files_to_extract.len() > 1 {
                 eprintln!("--out can only be used when extracting a single file");
@@ -336,6 +369,7 @@ fn parse(
 ) -> impl Iterator<Item = Result<File<'_>, MegParseError>> {
     let iter: Box<dyn Iterator<Item = Result<File<'_>, MegParseError>>> = match version {
         MegVersion::V1 => Box::new(parser::parse_v1(data)),
+        MegVersion::V2 => Box::new(parser::parse_v2(data)),
         v => {
             eprintln!("MEGA file version {v:?} is not supported");
             exit(2);

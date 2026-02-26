@@ -29,6 +29,8 @@ enum Commands {
 }
 
 fn main() {
+    tracing_subscriber::fmt::init();
+
     let args = Cli::parse();
     match args.command {
         Commands::List(cmd) => cmd.run(),

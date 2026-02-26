@@ -6,13 +6,19 @@ use tracing::warn;
 use crate::header::FileRecordV1V2;
 use crate::path::{MegPath, MegPathError};
 
-pub use v1::{parse as parse_v1, parse_opt as parse_v1_opt};
+pub use v1::{MegFileContentsV1, parse as parse_v1, parse_opt as parse_v1_opt};
+pub use v2::{MegFileContentsV2, parse as parse_v2, parse_opt as parse_v2_opt};
 
 mod v1;
+mod v2;
 
 /// Parser options for the MEGA file parser.
 #[derive(Debug, Clone)]
 pub struct ParseOptions {
+    /// Whether to validate the File ID in the header. Has no effect on V1 files.
+    ///
+    /// Default: true.
+    validate_file_id: bool,
     /// Whether to validate filename CRCs. If true, a mismatched CRC is an error instead of a
     /// warning.
     ///
@@ -36,18 +42,25 @@ pub struct ParseOptions {
     /// If true, validate the file bounds. If false, the bounds will still be checked, but invalid
     /// bounds will simply slice to as much of the file as is available in bounds.
     ///
+    /// If validate_data_start is also enabled, the file will be checked against the data start as
+    /// well for V2 and V3 files.
+    ///
     /// Default: true.
     validate_file_bounds: bool,
+    /// If true, checks that the data_start of v2 and v3 headers is in bounds for the file.
+    validate_data_start: bool,
 }
 
 impl ParseOptions {
     pub const fn new() -> Self {
         Self {
+            validate_file_id: true,
             validate_crc: true,
             validate_index: true,
             validate_name_index: true,
             validate_names: true,
             validate_file_bounds: true,
+            validate_data_start: true,
         }
     }
 }
@@ -84,6 +97,13 @@ pub enum MegParseError {
         cursor_position: usize,
         num_files: u32,
     },
+    #[error("MEGA file header had an unrecognized file ID: 0x{id1:08X} 0x{id2:08X}")]
+    InvalidFileId { id1: u32, id2: u32 },
+    #[error(
+        "MEGA file header specivied {data_start} as the start of data, but the file is only \
+        {file_size} bytes"
+    )]
+    InvalidDataStart { file_size: usize, data_start: u32 },
     /// Name Validation was enabled, and an invalid MegPath name was encountered.
     #[error("The File name at index {name_index} in the MEGA file was not valid: {path_error}")]
     InvalidName {
@@ -117,6 +137,15 @@ pub enum MegParseError {
         num_names: usize,
     },
     #[error(
+        "The File record at index {file_index} expected data at position {file_start}, but the \
+        MEGA header listed {data_start} as the start of the file data section"
+    )]
+    FileBelowDataStart {
+        file_index: usize,
+        file_start: u32,
+        data_start: u32,
+    },
+    #[error(
         "The File record at index {file_index} expected data at position {start} with length \
         {size}, but the file is only {file_size} bytes."
     )]
@@ -144,6 +173,7 @@ fn record_v1v2_to_file<'b>(
     bytes: &'b [u8],
     names: &[ValidatedName<'b>],
     file_index: usize,
+    data_start: Option<u32>,
     record: &FileRecordV1V2,
 ) -> Result<File<'b>, MegParseError> {
     if record.index as usize != file_index {
@@ -188,6 +218,19 @@ fn record_v1v2_to_file<'b>(
         }
     }
 
+    if let Some(data_start) = data_start {
+        if record.start < data_start {
+            let err = MegParseError::FileBelowDataStart {
+                file_index,
+                file_start: record.start,
+                data_start,
+            };
+            if options.validate_data_start && options.validate_file_bounds {
+                return Err(err);
+            }
+            warn!("{err}");
+        }
+    }
     let start = record.start as usize;
     let bound = match start.checked_add(record.size as usize) {
         Some(end) if start <= bytes.len() && end <= bytes.len() => start..end,

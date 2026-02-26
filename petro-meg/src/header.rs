@@ -1,5 +1,7 @@
 use byteorder::{ByteOrder as _, LE};
 
+pub const ID2: u32 = 0x3F7D70A4;
+
 /// V1 MEGA File Header.
 #[derive(Copy, Clone, Debug)]
 #[repr(C)]
@@ -37,15 +39,15 @@ impl HeaderV1 {
 pub(crate) struct HeaderV2 {
     // Format is based on documentation on petrolution.net:
     ///  +0000h  id1           uint32   ; Unknown field, always 0xFFFFFFFF
-    id1: u32,
+    pub(crate) id1: u32,
     ///  +0004h  id2           uint32   ; Unknown field, always 0x3F7D70A4
-    id2: u32,
+    pub(crate) id2: u32,
     ///  +0008h  dataStart     uint32   ; Offset in file of start of data
-    data_start: u32,
+    pub(crate) data_start: u32,
     ///  +000Ch  numFilenames  uint32   ; Number of filenames in the Filename Table
-    num_filenames: u32,
+    pub(crate) num_filenames: u32,
     ///  +0010h  numFiles      uint32   ; Number of files in the File Table
-    num_files: u32,
+    pub(crate) num_files: u32,
 }
 
 impl HeaderV2 {
