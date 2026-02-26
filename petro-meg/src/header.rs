@@ -23,8 +23,48 @@ impl HeaderV1 {
         }
     }
 
-    /// If the given bytes are long enough to read a HeaderV1, return the header and Rest, otherwise
-    /// return none.
+    /// If the given bytes are long enough to read a [`HeaderV1`], return the header and Rest,
+    /// otherwise return none.
+    pub(crate) fn split_off(b: &[u8]) -> Option<(Self, &[u8])> {
+        let (header, rest) = b.split_at_checked(size_of::<Self>())?;
+        Some((Self::read_from(header), rest))
+    }
+}
+
+/// V2 MEGA File Header.
+#[derive(Copy, Clone, Debug)]
+#[repr(C)]
+pub(crate) struct HeaderV2 {
+    // Format is based on documentation on petrolution.net:
+    ///  +0000h  id1           uint32   ; Unknown field, always 0xFFFFFFFF
+    id1: u32,
+    ///  +0004h  id2           uint32   ; Unknown field, always 0x3F7D70A4
+    id2: u32,
+    ///  +0008h  dataStart     uint32   ; Offset in file of start of data
+    data_start: u32,
+    ///  +000Ch  numFilenames  uint32   ; Number of filenames in the Filename Table
+    num_filenames: u32,
+    ///  +0010h  numFiles      uint32   ; Number of files in the File Table
+    num_files: u32,
+}
+
+impl HeaderV2 {
+    /// Read a header from the start of the given bytes.
+    ///
+    /// Panics if there aren't enough bytes.
+    pub(crate) fn read_from(b: &[u8]) -> Self {
+        assert!(b.len() >= size_of::<Self>());
+        Self {
+            id1: LE::read_u32(&b[0..4]),
+            id2: LE::read_u32(&b[4..8]),
+            data_start: LE::read_u32(&b[8..12]),
+            num_filenames: LE::read_u32(&b[12..16]),
+            num_files: LE::read_u32(&b[16..20]),
+        }
+    }
+
+    /// If the given bytes are long enough to read a [`HeaderV2`], return the header and Rest,
+    /// otherwise return none.
     pub(crate) fn split_off(b: &[u8]) -> Option<(Self, &[u8])> {
         let (header, rest) = b.split_at_checked(size_of::<Self>())?;
         Some((Self::read_from(header), rest))
@@ -33,6 +73,8 @@ impl HeaderV1 {
 
 /// Split a single name record off the front of the given slice, returning the path and the
 /// remaining bytes.
+///
+/// All MEGA file versions use the same format for the file names table.
 pub(crate) fn split_off_name(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
     // Format for each name record is based on documentation on petrolution.net:
     //   +0000h  length        uint16   ; Length of the filename, in characters

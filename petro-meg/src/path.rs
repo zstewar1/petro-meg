@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::hash::Hash;
 use std::ops::{Deref, DerefMut};
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use thiserror::Error;
@@ -159,6 +160,17 @@ impl MegPath {
             // we sliced to only the content after the last dir separator.
             Some(unsafe { Component::from_bytes_unchecked(slice) })
         }
+    }
+
+    /// Creates a PathBuf with the components of this [`MegPath`].
+    ///
+    /// Case is preserved.
+    pub fn to_path_buf(&self) -> PathBuf {
+        let mut out = PathBuf::with_capacity(self.len());
+        for component in self.components() {
+            out.push(component.as_str());
+        }
+        out
     }
 }
 
