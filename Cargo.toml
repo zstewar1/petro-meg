@@ -1,3 +1,9 @@
 [workspace]
 members = ["petro-meg", "petro-meg-cli"]
 resolver = "2"
+
+[workspace.package]
+license = "MIT"
+keywords = ["gamedev", "petroglyph", "mega+file"]
+categories = ["game-development"]
+readme = "README.md"
