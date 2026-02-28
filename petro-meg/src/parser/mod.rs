@@ -39,6 +39,10 @@ pub struct ParseOptions {
     ///
     /// Default: true.
     validate_names: bool,
+    /// Whether to validate that file names are less than the windows 260 character limit.
+    ///
+    /// Default: true.
+    validate_name_length: bool,
     /// If true, validate the file bounds. If false, the bounds will still be checked, but invalid
     /// bounds will simply slice to as much of the file as is available in bounds.
     ///
@@ -59,6 +63,7 @@ impl ParseOptions {
             validate_index: true,
             validate_name_index: true,
             validate_names: true,
+            validate_name_length: true,
             validate_file_bounds: true,
             validate_data_start: true,
         }
@@ -110,6 +115,13 @@ pub enum MegParseError {
         name_index: u32,
         path_error: MegPathError,
     },
+    /// Name Length Validation was enabled, and a name was encountered that exceeded the length
+    /// limit.
+    #[error(
+        "The File name at index {name_index} exceeded the Window 260 character limit for file \
+        paths; length: {name_len}"
+    )]
+    NameTooLong { name_index: u32, name_len: usize },
     #[error(
         "The File record at index {file_index} expected its name to have a crc of {expected_crc}, \
         but the name's actual crc was {actual_crc}"

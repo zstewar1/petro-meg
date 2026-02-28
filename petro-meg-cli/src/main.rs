@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 
 use crate::read::{ExtractCmd, ListCmd};
 
@@ -13,12 +13,6 @@ struct Cli {
     command: Commands,
 }
 
-#[derive(ValueEnum, Clone, Copy, Debug)]
-enum MegVersion {
-    V1,
-    V2,
-    V3,
-}
 
 #[derive(Subcommand)]
 enum Commands {

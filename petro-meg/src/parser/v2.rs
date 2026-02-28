@@ -2,7 +2,7 @@ use tracing::{instrument, warn};
 
 use crate::header::{FileRecordV1V2, HeaderV2, ID2, split_off_name};
 use crate::parser::{File, MegParseError, ParseOptions};
-use crate::path::MegPath;
+use crate::path::{MegPath, WIN_PATH_LIMIT};
 
 use super::{ValidatedName, record_v1v2_to_file};
 
@@ -178,6 +178,16 @@ fn parse_header_and_names<'b>(
                 num_names: header.num_filenames,
                 name_index,
             })?;
+        if raw_name.len() > WIN_PATH_LIMIT {
+            let err = MegParseError::NameTooLong {
+                name_index,
+                name_len: raw_name.len(),
+            };
+            if options.validate_name_length {
+                return Err(err);
+            }
+            warn!("{err}");
+        }
         let validated_name = match MegPath::from_bytes(raw_name) {
             Ok(name) => Some(name),
             Err(path_error) => {

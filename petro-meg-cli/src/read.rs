@@ -5,11 +5,11 @@ use std::process::exit;
 
 use clap::{Args, ValueEnum};
 use globset::{Candidate, GlobBuilder, GlobSet};
+use petro_meg::version::{MegVersion, self};
 use petro_meg::parser::{self, File, MegParseError};
 use petro_meg::path::{MegPath, MegPathBuf};
 use regex::bytes::RegexSetBuilder;
 
-use crate::MegVersion;
 
 #[derive(Args)]
 struct ReaderArgs {
@@ -17,8 +17,8 @@ struct ReaderArgs {
     source: PathBuf,
 
     /// Which MEGA file version to read the file as.
-    #[arg(short = 'v', long = "meg-version", value_enum, default_value_t = MegVersion::V1)]
-    mega_version: MegVersion,
+    #[arg(short = 'v', long = "meg-version")]
+    mega_version: Option<MegVersion>,
 }
 
 #[derive(Args)]
@@ -364,9 +364,10 @@ fn load_file(path: impl AsRef<Path>) -> Vec<u8> {
 }
 
 fn parse(
-    version: MegVersion,
+    version: Option<MegVersion>,
     data: &[u8],
 ) -> impl Iterator<Item = Result<File<'_>, MegParseError>> {
+    let version = version.unwrap_or_else(|| guess_version(data));
     let iter: Box<dyn Iterator<Item = Result<File<'_>, MegParseError>>> = match version {
         MegVersion::V1 => Box::new(parser::parse_v1(data)),
         MegVersion::V2 => Box::new(parser::parse_v2(data)),
@@ -376,6 +377,21 @@ fn parse(
         }
     };
     iter
+}
+
+/// Try to guess the MEGA file version.
+fn guess_version(data: &[u8]) -> MegVersion {
+    eprintln!("No Meg Version provided, attempting to guess format from file contents");
+    match version::guess_version(data) {
+        Ok(v) => {
+            eprintln!("Detected version {v}");
+            v
+        },
+        Err(e) => {
+            eprintln!("Unable to guess MEGA file version: {e}");
+            exit(1);
+        }
+    }
 }
 
 /// Extract the file from the result or exit with an error message.

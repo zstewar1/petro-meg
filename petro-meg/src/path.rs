@@ -31,6 +31,9 @@ macro_rules! impl_path_cmp {
     };
 }
 
+/// Path length limit for Windows, which we also apply to MEGA paths, in some contexts.
+pub(crate) const WIN_PATH_LIMIT: usize = 260;
+
 /// Represents a path in a Petroglyph MEGA file.
 ///
 /// The path type performs relatively strict validation to avoid constructing MEGA files which don't
@@ -549,7 +552,7 @@ impl fmt::Display for MegPathBuf {
 }
 
 /// Check if the given ascii character is a valid directory separator.
-fn is_dir_separator(c: u8) -> bool {
+pub(crate) fn is_dir_separator(c: u8) -> bool {
     c == b'/' || c == b'\\'
 }
 
@@ -559,7 +562,7 @@ fn is_valid_component_end(c: u8) -> bool {
 }
 
 /// Returns true if the character is valid for a path component.
-fn is_valid_component(c: u8) -> bool {
+pub(crate) fn is_valid_component(c: u8) -> bool {
     c.is_ascii()
         && c > 31
         && !is_dir_separator(c)
