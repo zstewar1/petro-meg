@@ -5,11 +5,10 @@ use std::process::exit;
 
 use clap::{Args, ValueEnum};
 use globset::{Candidate, GlobBuilder, GlobSet};
-use petro_meg::version::{MegVersion, self};
-use petro_meg::parser::{self, File, MegParseError};
+use petro_meg::parser::{self, FileEntry, MegReadError};
 use petro_meg::path::{MegPath, MegPathBuf};
+use petro_meg::version::{self, MegVersion};
 use regex::bytes::RegexSetBuilder;
-
 
 #[derive(Args)]
 struct ReaderArgs {
@@ -32,7 +31,7 @@ impl ListCmd {
     pub(crate) fn run(&self) {
         let data = load_file(&self.reader.source);
         for file in parse(self.reader.mega_version, &data).map(unwrap_file_or_exit) {
-            println!("{}: {}", file.path().unwrap(), file.contents().len());
+            println!("{}: {}", file.name(), file.contents().count());
         }
     }
 }
@@ -119,11 +118,11 @@ impl ExtractCmd {
     pub(crate) fn run(&self) {
         let data = load_file(&self.reader.source);
 
-        let mut files_to_extract = HashMap::<MegPathBuf, Vec<File>>::new();
+        let mut files_to_extract = HashMap::<MegPathBuf, Vec<FileEntry>>::new();
         if self.all {
             for file in parse(self.reader.mega_version, &data).map(unwrap_file_or_exit) {
                 files_to_extract
-                    .entry(file.path().unwrap().to_owned())
+                    .entry(file.name().to_owned())
                     .or_default()
                     .push(file);
             }
@@ -147,9 +146,9 @@ impl ExtractCmd {
                         exit(1);
                     }
                     for file in parse(self.reader.mega_version, &data).map(unwrap_file_or_exit) {
-                        if paths_to_extract.contains(file.path().unwrap()) {
+                        if paths_to_extract.contains(file.name().unwrap()) {
                             files_to_extract
-                                .entry(file.path().unwrap().to_owned())
+                                .entry(file.name().unwrap().to_owned())
                                 .or_default()
                                 .push(file);
                         }
@@ -207,7 +206,7 @@ impl ExtractCmd {
                         let candidate = Candidate::from_bytes(&path);
                         if globs.is_match_candidate(&candidate) {
                             files_to_extract
-                                .entry(file.path().unwrap().to_owned())
+                                .entry(file.name().unwrap().to_owned())
                                 .or_default()
                                 .push(file);
                         }
@@ -224,7 +223,7 @@ impl ExtractCmd {
                     for file in parse(self.reader.mega_version, &data).map(unwrap_file_or_exit) {
                         if regex_set.is_match(file.raw_name().unwrap()) {
                             files_to_extract
-                                .entry(file.path().unwrap().to_owned())
+                                .entry(file.name().unwrap().to_owned())
                                 .or_default()
                                 .push(file);
                         }
@@ -249,7 +248,7 @@ impl ExtractCmd {
                     let res = writeln!(
                         stdout,
                         "{}: {} bytes:",
-                        file.path().unwrap(),
+                        file.name().unwrap(),
                         file.contents().len()
                     );
                     if let Err(e) = res {
@@ -289,11 +288,11 @@ impl ExtractCmd {
                 println!(
                     "Would extract {} bytes from {} to {}",
                     file.contents().len(),
-                    file.path().unwrap(),
+                    file.name().unwrap(),
                     out.display()
                 );
             } else {
-                println!("Extracting {} to {}", file.path().unwrap(), out.display());
+                println!("Extracting {} to {}", file.name().unwrap(), out.display());
                 if let Err(e) = std::fs::write(out, file.contents()) {
                     eprintln!("Writing to output file {} failed: {e}", out.display());
                     exit(1);
@@ -309,7 +308,7 @@ impl ExtractCmd {
         };
         for files in files_to_extract.into_values() {
             for (idx, file) in files.iter().enumerate() {
-                let mut out_path = file.path().unwrap().to_path_buf();
+                let mut out_path = file.name().unwrap().to_path_buf();
                 self.convert_case_mode.convert(&mut out_path);
                 if files.len() > 1 {
                     out_path.add_extension(format!("{idx}"));
@@ -319,13 +318,13 @@ impl ExtractCmd {
                     println!(
                         "Would extract {} bytes from {} to {}",
                         file.contents().len(),
-                        file.path().unwrap(),
+                        file.name().unwrap(),
                         out_path.display()
                     );
                 } else {
                     println!(
                         "Extracting {} to {}",
-                        file.path().unwrap(),
+                        file.name().unwrap(),
                         out_path.display()
                     );
                     if let Some(parent) = out_path.parent() {
@@ -334,13 +333,13 @@ impl ExtractCmd {
                                 "Failed to create output directory {}: {e}",
                                 parent.display()
                             );
-                            eprintln!("Skipping file {}", file.path().unwrap());
+                            eprintln!("Skipping file {}", file.name().unwrap());
                             continue;
                         }
                     }
                     if let Err(e) = std::fs::write(&out_path, file.contents()) {
                         eprintln!("Failed to open output file {}: {e}", out_path.display());
-                        eprintln!("Skipping file {}", file.path().unwrap());
+                        eprintln!("Skipping file {}", file.name().unwrap());
                         continue;
                     }
                 }
@@ -366,9 +365,9 @@ fn load_file(path: impl AsRef<Path>) -> Vec<u8> {
 fn parse(
     version: Option<MegVersion>,
     data: &[u8],
-) -> impl Iterator<Item = Result<File<'_>, MegParseError>> {
+) -> impl Iterator<Item = Result<FileEntry<'_>, MegReadError>> {
     let version = version.unwrap_or_else(|| guess_version(data));
-    let iter: Box<dyn Iterator<Item = Result<File<'_>, MegParseError>>> = match version {
+    let iter: Box<dyn Iterator<Item = Result<FileEntry<'_>, MegReadError>>> = match version {
         MegVersion::V1 => Box::new(parser::parse_v1(data)),
         MegVersion::V2 => Box::new(parser::parse_v2(data)),
         v => {
@@ -386,7 +385,7 @@ fn guess_version(data: &[u8]) -> MegVersion {
         Ok(v) => {
             eprintln!("Detected version {v}");
             v
-        },
+        }
         Err(e) => {
             eprintln!("Unable to guess MEGA file version: {e}");
             exit(1);
@@ -395,7 +394,7 @@ fn guess_version(data: &[u8]) -> MegVersion {
 }
 
 /// Extract the file from the result or exit with an error message.
-fn unwrap_file_or_exit<'b>(file: Result<File<'b>, MegParseError>) -> File<'b> {
+fn unwrap_file_or_exit<'b>(file: Result<FileEntry<'b>, MegReadError>) -> FileEntry<'b> {
     match file {
         Ok(file) => file,
         Err(e) => {

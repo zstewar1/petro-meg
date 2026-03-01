@@ -1,76 +1,77 @@
-use std::usize;
+use std::io::Read;
+use std::ops::Range;
+use std::{io, usize};
 
+use byteorder::{LE, ReadBytesExt as _};
 use thiserror::Error;
 use tracing::warn;
 
-use crate::header::FileRecordV1V2;
-use crate::path::{MegPath, MegPathError};
+use crate::crypto::Key;
+use crate::path::{MegPath, MegPathBuf, MegPathError, WIN_PATH_LIMIT};
 
-pub use v1::{MegFileContentsV1, parse as parse_v1, parse_opt as parse_v1_opt};
-pub use v2::{MegFileContentsV2, parse as parse_v2, parse_opt as parse_v2_opt};
+mod any_version;
+mod version1;
+mod version2;
+mod version3;
 
-mod v1;
-mod v2;
+pub const ID2: u32 = 0x3F7D70A4;
 
 /// Parser options for the MEGA file parser.
 #[derive(Debug, Clone)]
-pub struct ParseOptions {
-    /// Whether to validate the File ID in the header. Has no effect on V1 files.
-    ///
-    /// Default: true.
-    validate_file_id: bool,
-    /// Whether to validate filename CRCs. If true, a mismatched CRC is an error instead of a
+pub struct MegReadOptions {
+    /// Whether to validate filename CRCs. If `true`, a mismatched CRC is an error instead of a
     /// warning.
     ///
-    /// Default: true.
+    /// Default: `true`.
     validate_crc: bool,
-    /// Whether to validate file indexes. If true, a mismatched file index is an error instead of a
+    /// Whether to validate file indexes. If `true`, a mismatched file index is an error instead of a
     /// warning.
     ///
-    /// Default: true.
+    /// Default: `true`.
     validate_index: bool,
-    /// If true, the index of the name must be in the valid range. If false, an out of bounds name
-    /// index will be treated as empty.
-    ///
-    /// Default: true.
-    validate_name_index: bool,
-    /// Whether to validate file names. If true, the file name will be validated, if not, arbitrary
-    /// bytes will be allowed in file names.
-    ///
-    /// Default: true.
-    validate_names: bool,
     /// Whether to validate that file names are less than the windows 260 character limit.
     ///
-    /// Default: true.
+    /// Default: `true`.
     validate_name_length: bool,
-    /// If true, validate the file bounds. If false, the bounds will still be checked, but invalid
-    /// bounds will simply slice to as much of the file as is available in bounds.
+    /// Whether to validate that the number of names and number of files match.
     ///
-    /// If validate_data_start is also enabled, the file will be checked against the data start as
-    /// well for V2 and V3 files.
+    /// Default: `true`.
+    validate_name_count: bool,
+    /// Whether to validate that the names of files are unique.
     ///
-    /// Default: true.
-    validate_file_bounds: bool,
-    /// If true, checks that the data_start of v2 and v3 headers is in bounds for the file.
-    validate_data_start: bool,
+    /// Default: `true`.
+    validate_names_unique: bool,
+    /// Validate that file start is above data start.
+    ///
+    /// Default: `true`.
+    validate_file_start_data_start: bool,
+    /// Validate that all files in an encrypted file are also encrypted.
+    ///
+    /// Default: `true`.
+    validate_consistent_encryption: bool,
+    /// Encryption key and initial vector used for decrypting V3 MEGA files.
+    ///
+    /// Default: `None`.
+    key: Option<Key>,
 }
 
-impl ParseOptions {
+impl MegReadOptions {
+    /// Create a a new default options.
     pub const fn new() -> Self {
         Self {
-            validate_file_id: true,
             validate_crc: true,
             validate_index: true,
-            validate_name_index: true,
-            validate_names: true,
             validate_name_length: true,
-            validate_file_bounds: true,
-            validate_data_start: true,
+            validate_names_unique: true,
+            validate_name_count: true,
+            validate_file_start_data_start: true,
+            validate_consistent_encryption: true,
+            key: None,
         }
     }
 }
 
-impl Default for ParseOptions {
+impl Default for MegReadOptions {
     fn default() -> Self {
         Self::new()
     }
@@ -78,147 +79,218 @@ impl Default for ParseOptions {
 
 /// MegParseError.
 #[derive(Error, Debug)]
-pub enum MegParseError {
-    #[error("Mega file was only {file_size} but {min_bytes} are needed to parse the header")]
-    NotEnoughBytesForHeader { file_size: usize, min_bytes: usize },
-    #[error(
-        "Hit EOF while parsing the names table. Expected to parse {num_names} and was about to \
-        parse the name at index {name_index} from cursor position {cursor_position}, but the file \
-        was only {file_size} bytes"
-    )]
-    EofDuringNameParsing {
-        file_size: usize,
-        cursor_position: usize,
-        num_names: u32,
-        name_index: u32,
-    },
-    #[error(
-        "Hit EOF while retrieving the data for the File records table. Expected to have \
-        {num_files} File records but file length was only {file_size} bytes and the cursor \
-        position is {cursor_position}"
-    )]
-    EofDuringFileRecordsParsing {
-        file_size: usize,
-        cursor_position: usize,
-        num_files: u32,
-    },
+pub enum MegReadError {
+    /// Encountered an IO error while parsing.
+    #[error("Encountered an IO error while parsing: {0}")]
+    IoError(#[from] io::Error),
+    /// For V2 or V3, the first two words were not recognized as the correct file id.
     #[error("MEGA file header had an unrecognized file ID: 0x{id1:08X} 0x{id2:08X}")]
     InvalidFileId { id1: u32, id2: u32 },
+    /// For V3 only, the header had the 'encrypted' id version/flag but no crypto key was available
+    /// in the provided reader options.
     #[error(
-        "MEGA file header specivied {data_start} as the start of data, but the file is only \
-        {file_size} bytes"
+        "MEGA file header indicated that it was encrypted, but no key was provided to decrypt it"
     )]
-    InvalidDataStart { file_size: usize, data_start: u32 },
-    /// Name Validation was enabled, and an invalid MegPath name was encountered.
+    MissingKey,
+    /// Name count validation was enabled and the number of files listed differs from the number of
+    /// filenames.
+    #[error(
+        "MEGA file header had a different number of files and file names. \
+        num_filenames={num_filenames}, num_files={num_files}"
+    )]
+    NameFileCountMismatch { num_filenames: u32, num_files: u32 },
+    /// Name Length Validation was enabled, and a name was encountered that exceeded the length
+    /// limit.
+    #[error(
+        "The File name at index {name_index} exceeded the Windows 260 character limit for file \
+        paths. Actual length: {name_len}"
+    )]
+    NameTooLong { name_index: u32, name_len: usize },
+    /// An invalid MegPath name was encountered.
     #[error("The File name at index {name_index} in the MEGA file was not valid: {path_error}")]
     InvalidName {
         name_index: u32,
         path_error: MegPathError,
     },
-    /// Name Length Validation was enabled, and a name was encountered that exceeded the length
-    /// limit.
+    /// A V3 File record had a flags value other than 0 or 1.
+    #[error("The file record at index {file_index} had unrecognized flags: 0x{flags:04X}")]
+    InvalidFileFlags { file_index: u32, flags: u16 },
+    /// A V3 File record had an encryption flag which didn't match the containing MEGA file.
     #[error(
-        "The File name at index {name_index} exceeded the Window 260 character limit for file \
-        paths; length: {name_len}"
+        "The file record at index {file_index} had encryption={record_encrypted} but the \
+        containing MEGA file had encryption={meg_encrypted}"
     )]
-    NameTooLong { name_index: u32, name_len: usize },
-    #[error(
-        "The File record at index {file_index} expected its name to have a crc of {expected_crc}, \
-        but the name's actual crc was {actual_crc}"
-    )]
-    InvalidCrc {
-        file_index: usize,
-        expected_crc: u32,
-        actual_crc: u32,
+    MismatchedEncryption {
+        file_index: u32,
+        /// Whether the MEGA file used encryption.
+        meg_encrypted: bool,
+        /// Whether this particular file record used encryption.
+        record_encrypted: bool,
     },
     #[error(
         "The File record at index {file_index} specified that it should be at index \
         {index_from_record}"
     )]
     InvalidFileIndex {
-        file_index: usize,
-        index_from_record: usize,
+        file_index: u32,
+        index_from_record: u32,
     },
     #[error(
         "The File record at index {file_index} referenced name index {name_index} but there are \
         only {num_names} names defined"
     )]
     NameIndexOutOfRange {
-        file_index: usize,
-        name_index: usize,
-        num_names: usize,
+        file_index: u32,
+        name_index: u32,
+        num_names: u32,
+    },
+    #[error(
+        "The File record at index {file_index} referenced name index {name_index} but another file \
+        already has that name"
+    )]
+    NameAlreadyUsed {
+        file_index: u32,
+        name_index: u32,
+        num_names: u32,
+    },
+    #[error(
+        "The File record at index {file_index} expected its name to have a crc of {expected_crc}, \
+        but the name's actual crc was {actual_crc}"
+    )]
+    InvalidCrc {
+        file_index: u32,
+        expected_crc: u32,
+        actual_crc: u32,
     },
     #[error(
         "The File record at index {file_index} expected data at position {file_start}, but the \
         MEGA header listed {data_start} as the start of the file data section"
     )]
     FileBelowDataStart {
-        file_index: usize,
+        file_index: u32,
         file_start: u32,
         data_start: u32,
     },
-    #[error(
-        "The File record at index {file_index} expected data at position {start} with length \
-        {size}, but the file is only {file_size} bytes."
-    )]
-    FileOutOfBounds {
-        file_index: usize,
-        /// The full file size of the MEGA file.
-        file_size: usize,
-        /// Start position of the file record within the mega file.
-        start: u32,
-        size: u32,
-    },
 }
 
-/// Stores a name alongside its validated form.
-#[derive(Debug, Default, Clone, Copy)]
-struct ValidatedName<'b> {
-    /// The raw bytes of the name.
-    raw_name: &'b [u8],
-    /// If the name was valid, this is raw_name cast to a MegPath. Otherwise this is None.
-    validated_name: Option<&'b MegPath>,
+/// Trait for implementing MegMetaReader for various MEGA file versions.
+pub trait ReadMegMeta: Sized + private::Sealed {
+    fn read_meg_meta<R: Read>(self, reader: R) -> Result<Vec<FileEntry>, MegReadError> {
+        const DEFAULT_OPTIONS: &'static MegReadOptions = &MegReadOptions::new();
+        self.read_meg_meta_opt(reader, DEFAULT_OPTIONS)
+    }
+
+    fn read_meg_meta_opt<R: Read>(
+        self,
+        reader: R,
+        options: &MegReadOptions,
+    ) -> Result<Vec<FileEntry>, MegReadError>;
 }
 
-fn record_v1v2_to_file<'b>(
-    options: &ParseOptions,
-    bytes: &'b [u8],
-    names: &[ValidatedName<'b>],
-    file_index: usize,
-    data_start: Option<u32>,
-    record: &FileRecordV1V2,
-) -> Result<File<'b>, MegParseError> {
-    if record.index as usize != file_index {
-        let err = MegParseError::InvalidFileIndex {
-            file_index,
-            index_from_record: record.index as usize,
+mod private {
+    pub trait Sealed {}
+
+    impl Sealed for crate::version::MegVersion {}
+    impl Sealed for crate::version::MegV1 {}
+    impl Sealed for crate::version::MegV2 {}
+    impl Sealed for crate::version::MegV3 {}
+    impl Sealed for crate::version::GuessVersion {}
+}
+
+/// Version-specific ReaderState. Provides hooks for version-specific operations.
+trait ReaderState: Sized {
+    /// Gets the number of filename entries in the filenames table.
+    fn num_filenames(&self) -> u32;
+
+    /// Gets the humber of files in the files table.
+    fn num_files(&self) -> u32;
+
+    /// Read the names from the MEGA file.
+    fn read_names<R: Read>(
+        &self,
+        reader: &mut R,
+        options: &MegReadOptions,
+    ) -> Result<Vec<Option<MegPathBuf>>, MegReadError> {
+        read_names(reader, self.num_filenames(), options)
+    }
+
+    /// Read a single file record from the file.
+    ///
+    /// Index is provided only for error messages.
+    fn read_file_record<R: Read>(
+        &self,
+        reader: &mut R,
+        options: &MegReadOptions,
+        index: u32,
+    ) -> Result<FileRecord, MegReadError>;
+}
+
+/// A raw file record, not yet interpreted.
+struct FileRecord {
+    /// Encryption flag. Only used by V3 files.
+    encrypted: bool,
+    /// CRC-32 of the filename.
+    crc: u32,
+    /// Index of this record in the records table.
+    index: u32,
+    /// Size of this file in the data section.
+    size: u32,
+    /// Start of this file relative to the start of the file.
+    start: u32,
+    /// Index of the name in the names table.
+    name: u32,
+}
+
+fn read_meg_meta<S: ReaderState, R: Read>(
+    state: S,
+    mut reader: R,
+    options: &MegReadOptions,
+) -> Result<Vec<FileEntry>, MegReadError> {
+    if state.num_filenames() != state.num_files() {
+        let err = MegReadError::NameFileCountMismatch {
+            num_filenames: state.num_filenames(),
+            num_files: state.num_files(),
         };
-        if options.validate_index {
+        if options.validate_name_count {
             return Err(err);
         }
         warn!("{err}");
     }
-    let name = match names.get(record.name as usize) {
-        Some(name) => Some(name),
-        None => {
-            let err = MegParseError::NameIndexOutOfRange {
+    let mut names = state.read_names(&mut reader, options)?;
+
+    let mut files = Vec::with_capacity(state.num_files() as usize);
+    for file_index in 0..state.num_files() {
+        let record = state.read_file_record(&mut reader, options, file_index)?;
+        if record.index != file_index {
+            let err = MegReadError::InvalidFileIndex {
                 file_index,
-                name_index: record.name as usize,
-                num_names: names.len(),
+                index_from_record: record.index,
             };
-            if options.validate_name_index {
+            if options.validate_index {
                 return Err(err);
             }
             warn!("{err}");
-            None
         }
-    };
-    // If there is no name, skip CRC validation as that will almost certainly fail, and we'll
-    // already have logged a warning about the name index being out of range if we got this far.
-    if let Some(name) = name {
-        let actual_crc = crc32fast::hash(name.raw_name);
+        let name =
+            names
+                .get_mut(record.name as usize)
+                .ok_or(MegReadError::NameIndexOutOfRange {
+                    file_index,
+                    name_index: record.name,
+                    num_names: state.num_filenames(),
+                })?;
+        let name = if options.validate_names_unique {
+            name.take().ok_or(MegReadError::NameAlreadyUsed {
+                file_index,
+                name_index: record.name,
+                num_names: state.num_filenames(),
+            })?
+        } else {
+            name.clone().unwrap()
+        };
+        let actual_crc = crc32fast::hash(name.as_bytes());
         if record.crc != actual_crc {
-            let err = MegParseError::InvalidCrc {
+            let err = MegReadError::InvalidCrc {
                 file_index,
                 expected_crc: record.crc,
                 actual_crc,
@@ -228,96 +300,91 @@ fn record_v1v2_to_file<'b>(
             }
             warn!("{err}");
         }
+        // Range cannot overflow since we're going from u32 to u64.
+        let start = record.start as u64;
+        let end = start + record.size as u64;
+        files.push(FileEntry {
+            name,
+            contents: start..end,
+            encrypted: record.encrypted,
+        });
     }
 
-    if let Some(data_start) = data_start {
-        if record.start < data_start {
-            let err = MegParseError::FileBelowDataStart {
-                file_index,
-                file_start: record.start,
-                data_start,
+    Ok(files)
+}
+
+/// Read all the file names from the given reader.
+fn read_names<R: Read>(
+    mut reader: R,
+    num_filenames: u32,
+    options: &MegReadOptions,
+) -> Result<Vec<Option<MegPathBuf>>, MegReadError> {
+    let mut names = Vec::with_capacity(num_filenames as usize);
+    // Read the number of entries needed to fill the names table.
+    for name_index in 0..num_filenames {
+        // All versions use the same u32
+        let name_len = reader.read_u32::<LE>()? as usize;
+        if name_len > WIN_PATH_LIMIT {
+            let err = MegReadError::NameTooLong {
+                name_index,
+                name_len,
             };
-            if options.validate_data_start && options.validate_file_bounds {
+            if options.validate_name_length {
                 return Err(err);
             }
             warn!("{err}");
         }
-    }
-    let start = record.start as usize;
-    let bound = match start.checked_add(record.size as usize) {
-        Some(end) if start <= bytes.len() && end <= bytes.len() => start..end,
-        end => {
-            let err = MegParseError::FileOutOfBounds {
-                file_index,
-                file_size: bytes.len(),
-                start: record.start,
-                size: record.size,
-            };
-            if options.validate_file_bounds {
-                return Err(err);
+        let mut raw_name = vec![0u8; name_len];
+        reader.read_exact(&mut raw_name)?;
+        let name = match MegPathBuf::from_bytes(raw_name) {
+            Ok(name) => name,
+            Err(path_error) => {
+                return Err(MegReadError::InvalidName {
+                    name_index,
+                    path_error,
+                });
             }
-            warn!("{err}");
-            let start = start.min(bytes.len());
-            let end = end.unwrap_or(usize::MAX).min(bytes.len());
-            start..end
-        }
-    };
-    let contents = &bytes[bound];
+        };
+        names.push(Some(name));
+    }
+    Ok(names)
+}
 
-    let (raw_name, path) = match name {
-        Some(name) => (Some(name.raw_name), name.validated_name),
-        None => (None, None),
-    };
-
-    Ok(File {
-        raw_name,
-        path,
-        contents,
-        expected_size: record.size as usize,
+/// Common implementation for read_file_record for both V1 and V2 MEGA files.
+fn read_unencrypted_file_record<R: Read>(reader: &mut R) -> Result<FileRecord, MegReadError> {
+    Ok(FileRecord {
+        encrypted: false,
+        crc: reader.read_u32::<LE>()?,
+        index: reader.read_u32::<LE>()?,
+        size: reader.read_u32::<LE>()?,
+        start: reader.read_u32::<LE>()?,
+        name: reader.read_u32::<LE>()?,
     })
 }
 
 /// Entry for a file read from the mega file files table.
-#[derive(Debug, Clone)]
-pub struct File<'b> {
-    /// The raw bytes of the name.
-    raw_name: Option<&'b [u8]>,
-    /// The validated MEGA file path. If Some, this is the same as raw_name.
-    path: Option<&'b MegPath>,
-    /// Contents of the file.
-    contents: &'b [u8],
-    /// The expected size of the file from the header. May differ from the len of contents if file
-    /// bounds validation was skipped.
-    expected_size: usize,
+pub struct FileEntry {
+    /// The path/name of the file.
+    name: MegPathBuf,
+    /// Range of the original source occupied by this file.
+    contents: Range<u64>,
+    /// Whether this file was encrypted.
+    encrypted: bool,
 }
 
-impl<'b> File<'b> {
-    /// Gets the raw name from the file. If the name index was out of range and name index
-    /// validation was skipped, this will be empty. If name index validation was enabled, this will
-    /// always be Some.
-    pub fn raw_name(&self) -> Option<&[u8]> {
-        self.raw_name
+impl FileEntry {
+    /// Gets the MEGA file path that the file entry was stored under.
+    pub fn name(&self) -> &MegPath {
+        &self.name
     }
 
-    /// Gets the mega file path. This is generally the same as Name, but with validation. This may
-    /// be `None` if either name index validation was skipped, and no name matched, or name
-    /// validation was skipped and the name was invalid. If both name validation and name index
-    /// validation are enabled, this will always be Some.
-    pub fn path(&self) -> Option<&MegPath> {
-        self.path
+    /// Get the range of the original MEGA file occupied by this file's contents.
+    pub fn contents(&self) -> Range<u64> {
+        self.contents.clone()
     }
 
-    /// Contents of the file. If file bounds validation was skipped, this may be less than the size
-    /// indended in the MEGA file. If bounds validation was enabled, this is the complete file
-    /// contents.
-    pub fn contents(&self) -> &[u8] {
-        self.contents
-    }
-
-    /// If true, the contents represents the complete file. If false, the contents is only partial,
-    /// some of the file contents was outside the bounds of the MEGA file. If file bounds validation
-    /// was enabled, this will always be true.
-    pub fn is_complete(&self) -> bool {
-        self.contents.len() == self.expected_size
+    /// Returns true if the file was encrypted.
+    pub fn encrypted(&self) -> bool {
+        self.encrypted
     }
 }

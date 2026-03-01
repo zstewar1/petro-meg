@@ -459,14 +459,14 @@ impl MegPathBuf {
     }
 
     /// Convert a vector of bytes to a MEGA path.
-    pub fn from_vec(bytes: Vec<u8>) -> Result<Self, MegPathError> {
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, MegPathError> {
         validate_path(&bytes)?;
         Ok(Self(bytes))
     }
 
     /// Convert a string into a MEGA path.
     pub fn from_string(string: String) -> Result<Self, MegPathError> {
-        Self::from_vec(string.into_bytes())
+        Self::from_bytes(string.into_bytes())
     }
 }
 
@@ -573,4 +573,12 @@ pub(crate) fn is_valid_component(c: u8) -> bool {
         && c != b'|'
         && c != b'?'
         && c != b'*'
+}
+
+/// Return true if the characters are all valid within MEGA file paths (though not necessarily in
+/// their current positions).
+pub(crate) fn is_valid_path_chars(chars: &[u8]) -> bool {
+    chars
+        .iter()
+        .all(|&ch| is_dir_separator(ch) || is_valid_component(ch))
 }

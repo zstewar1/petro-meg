@@ -13,7 +13,6 @@ struct Cli {
     command: Commands,
 }
 
-
 #[derive(Subcommand)]
 enum Commands {
     /// List the contents of a MEGA file.

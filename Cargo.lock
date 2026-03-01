@@ -290,7 +290,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 name = "petro-meg"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "byteorder",
+ "cbc",
  "crc32fast",
  "thiserror",
  "tracing",
@@ -300,8 +302,6 @@ dependencies = [
 name = "petro-meg-cli"
 version = "0.1.0"
 dependencies = [
- "aes",
- "cbc",
  "clap",
  "globset",
  "petro-meg",
