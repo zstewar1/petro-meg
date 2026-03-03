@@ -2,7 +2,7 @@ use std::io::Read;
 
 use byteorder::{LE, ReadBytesExt as _};
 
-use crate::parser::{
+use crate::reader::{
     FileEntry, MegReadError, MegReadOptions, ReadMegMeta, ReaderState,
     read_unencrypted_file_record, read_meg_meta,
 };

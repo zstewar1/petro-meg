@@ -13,6 +13,13 @@ pub struct Key {
     iv: [u8; 16],
 }
 
+impl Key {
+    /// Create a new key from the key bytes and initial vector.
+    pub fn new(key: [u8; 16], iv: [u8; 16]) -> Self {
+        Self { key, iv }
+    }
+}
+
 /// 128 bit AES block size.
 const BLOCK_SIZE: usize = 16;
 
@@ -63,7 +70,10 @@ impl<R> DecryptingReader<R> {
     /// Panics
     pub(crate) fn new_with_capacity(inner: R, key: &Key, capacity: usize) -> Self {
         let capacity = round_up_to_block(capacity as u64);
-        assert!(capacity <= usize::MAX as u64, "Next block size above capacity exceeds uszie max");
+        assert!(
+            capacity <= usize::MAX as u64,
+            "Next block size above capacity exceeds uszie max"
+        );
         let buf = Box::new_zeroed_slice(capacity as usize);
         // SAFETY: 0 is always a valid value for u8.
         let buf = unsafe { buf.assume_init() };

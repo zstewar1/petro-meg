@@ -75,6 +75,12 @@ impl MegReadOptions {
             key: None,
         }
     }
+
+    /// Set the crypto key used for reading.
+    pub const fn set_key(&mut self, key: Option<Key>) -> &mut Self {
+        self.key = key;
+        self
+    }
 }
 
 impl Default for MegReadOptions {
@@ -197,6 +203,7 @@ mod private {
     pub trait Sealed {}
 
     impl Sealed for crate::version::MegVersion {}
+    impl Sealed for Option<crate::version::MegVersion> {}
     impl Sealed for crate::version::MegV1 {}
     impl Sealed for crate::version::MegV2 {}
     impl Sealed for crate::version::MegV3 {}
@@ -398,6 +405,11 @@ impl FileEntry {
             .checked_add(size)
             .expect("start+size overflowed usize");
         start..end
+    }
+
+    /// Get the size of the file's contents in the MEGA file.
+    pub fn size(&self) -> u32 {
+        self.size
     }
 
     /// Returns true if the file was encrypted.

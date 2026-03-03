@@ -4,7 +4,7 @@ use byteorder::{LE, ReadBytesExt as _};
 use tracing::warn;
 
 use crate::crypto::DecryptingReader;
-use crate::parser::{
+use crate::reader::{
     FileEntry, FileRecord, ID2, MegReadError, MegReadOptions, ReadMegMeta, ReaderState,
     read_meg_meta, read_names, read_unencrypted_file_record,
 };

@@ -2,12 +2,12 @@ use std::io::{self, Read};
 
 use byteorder::{ByteOrder as _, LE, ReadBytesExt as _};
 
-use crate::parser::version1::ReadStateV1;
-use crate::parser::version2::ReadStateV2;
-use crate::parser::version3::ReadStateV3;
-use crate::parser::{FileEntry, ID2, MegReadError, MegReadOptions, ReadMegMeta, read_meg_meta};
 use crate::path::{WIN_PATH_LIMIT, is_valid_path_chars};
-use crate::version::{GuessVersion, MegVersion};
+use crate::reader::version1::ReadStateV1;
+use crate::reader::version2::ReadStateV2;
+use crate::reader::version3::ReadStateV3;
+use crate::reader::{FileEntry, ID2, MegReadError, MegReadOptions, ReadMegMeta, read_meg_meta};
+use crate::version::{GuessVersion, MegV1, MegV2, MegV3, MegVersion};
 
 impl ReadMegMeta for GuessVersion {
     fn read_meg_meta_opt<R: Read>(
@@ -84,22 +84,27 @@ impl ReadMegMeta for GuessVersion {
 impl ReadMegMeta for MegVersion {
     fn read_meg_meta_opt<R: Read>(
         self,
-        mut reader: R,
+        reader: R,
         options: &MegReadOptions,
     ) -> Result<Vec<FileEntry>, MegReadError> {
         match self {
-            MegVersion::V1 => {
-                let state = ReadStateV1::read_header(&mut reader, options)?;
-                read_meg_meta(state, reader, options)
-            }
-            MegVersion::V2 => {
-                let state = ReadStateV2::read_header(&mut reader, options)?;
-                read_meg_meta(state, reader, options)
-            }
-            MegVersion::V3 => {
-                let state = ReadStateV3::read_header(&mut reader, options)?;
-                read_meg_meta(state, reader, options)
-            }
+            MegVersion::V1 => MegV1.read_meg_meta_opt(reader, options),
+            MegVersion::V2 => MegV2.read_meg_meta_opt(reader, options),
+            MegVersion::V3 => MegV3.read_meg_meta_opt(reader, options),
+        }
+    }
+}
+
+/// If version is explicit, read as that version, otherwise guess the version.
+impl ReadMegMeta for Option<MegVersion> {
+    fn read_meg_meta_opt<R: Read>(
+        self,
+        reader: R,
+        options: &MegReadOptions,
+    ) -> Result<Vec<FileEntry>, MegReadError> {
+        match self {
+            Some(version) => version.read_meg_meta_opt(reader, options),
+            None => GuessVersion.read_meg_meta_opt(reader, options),
         }
     }
 }

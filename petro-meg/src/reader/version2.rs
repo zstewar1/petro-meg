@@ -3,7 +3,7 @@ use std::io::Read;
 use byteorder::{LE, ReadBytesExt as _};
 use tracing::warn;
 
-use crate::parser::{
+use crate::reader::{
     FileEntry, ID2, MegReadError, MegReadOptions, ReadMegMeta, ReaderState, read_meg_meta,
     read_unencrypted_file_record,
 };

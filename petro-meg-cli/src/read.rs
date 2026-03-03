@@ -1,14 +1,19 @@
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
+use std::fs::File;
+use std::io::{self, BufReader};
+use std::num::ParseIntError;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
 use clap::{Args, ValueEnum};
 use globset::{Candidate, GlobBuilder, GlobSet};
-use petro_meg::parser::{self, FileEntry, MegReadError};
-use petro_meg::path::{MegPath, MegPathBuf};
-use petro_meg::version::{self, MegVersion};
+use petro_meg::crypto::Key;
+use petro_meg::path::MegPath;
+use petro_meg::reader::{FileEntry, FileSegmentReader, MegReadOptions, ReadMegMeta};
+use petro_meg::version::MegVersion;
 use regex::bytes::RegexSetBuilder;
+use thiserror::Error;
 
 #[derive(Args)]
 struct ReaderArgs {
@@ -18,6 +23,89 @@ struct ReaderArgs {
     /// Which MEGA file version to read the file as.
     #[arg(short = 'v', long = "meg-version")]
     mega_version: Option<MegVersion>,
+
+    /// Key and initial vector for encrypted MEGA file reading. This should consist of two 128 bit
+    /// hexadecimal numbers separated by a colon. The first value is the key and the second is the
+    /// initial vector.
+    #[arg(long, value_parser = parse_key)]
+    key: Option<Key>,
+}
+
+#[derive(Error, Debug)]
+enum ParseKeyError {
+    #[error("Expected format <KEY>:<IV>, but no ':' was found")]
+    NoSeparator,
+    #[error("Expected format <KEY>:<IV>, but found an extra ':'")]
+    ExtraSeparator,
+    #[error("Expected key to be 32 hex characters but got {len} bytes")]
+    InvalidKeyLen { len: usize },
+    #[error("Expected initial vector to be 32 hex characters but got {len} bytes")]
+    InvalidIVLen { len: usize },
+    #[error("Could not parse the key: {0}")]
+    InvalidKey(ParseIntError),
+    #[error("Could not parse the initial vector: {0}")]
+    InvalidIV(ParseIntError),
+}
+
+/// Parse a MEGA file key out of a string consisting of <HEX KEY>:<HEX IV>
+fn parse_key(s: &str) -> Result<Key, ParseKeyError> {
+    let s = s.trim();
+    let mut split = s.split(':');
+    // The first output of split should always be Some, since even the empty string produces at
+    // least a single empty string result.
+    let key = split.next().ok_or(ParseKeyError::NoSeparator)?.trim();
+    let iv = split.next().ok_or(ParseKeyError::NoSeparator)?.trim();
+    if split.next().is_some() {
+        return Err(ParseKeyError::ExtraSeparator);
+    }
+    if key.len() != 32 {
+        return Err(ParseKeyError::InvalidKeyLen { len: key.len() });
+    }
+    if iv.len() != 32 {
+        return Err(ParseKeyError::InvalidIVLen { len: iv.len() });
+    }
+    let key = u128::from_str_radix(key, 16).map_err(ParseKeyError::InvalidKey)?;
+    let iv = u128::from_str_radix(iv, 16).map_err(ParseKeyError::InvalidIV)?;
+    // The correct byte order here should be big endian because number parsing treats the first
+    // bytes in the input as the high order bytes.
+    Ok(Key::new(key.to_be_bytes(), iv.to_be_bytes()))
+}
+
+/// Holds the version, read options and opened MEGA file.
+struct ReadContext {
+    /// Version of the MEGA file being read.
+    mega_version: Option<MegVersion>,
+    /// File being read.
+    file: File,
+    /// Read options used for the reader.
+    options: MegReadOptions,
+}
+
+impl ReadContext {
+    /// Read the MEGA file metadata for the context.
+    fn read_meg_meta(&mut self) -> Vec<FileEntry> {
+        let res = self
+            .mega_version
+            .read_meg_meta_opt(BufReader::new(&mut self.file), &self.options);
+        match res {
+            Ok(files) => files,
+            Err(e) => {
+                eprintln!("Failed to read the MEGA file files list: {e}");
+                exit(1);
+            }
+        }
+    }
+
+    /// Gets the reader for the given file.
+    fn read_file(&mut self, file: &FileEntry) -> FileSegmentReader<'_> {
+        match file.extract_from(&mut self.file, &self.options) {
+            Ok(segment) => segment,
+            Err(e) => {
+                eprintln!("Unable to create file extractor for {}: {e}", file.name());
+                exit(1);
+            }
+        }
+    }
 }
 
 #[derive(Args)]
@@ -28,10 +116,11 @@ pub(crate) struct ListCmd {
 
 impl ListCmd {
     /// Executes the list command on a MEGA file.
-    pub(crate) fn run(&self) {
-        let data = load_file(&self.reader.source);
-        for file in parse(self.reader.mega_version, &data).map(unwrap_file_or_exit) {
-            println!("{}: {}", file.name(), file.contents().count());
+    pub(crate) fn run(self) {
+        let mut context = args_to_context(self.reader);
+        let files = context.read_meg_meta();
+        for file in files {
+            println!("{}: {}", file.name(), file.size());
         }
     }
 }
@@ -115,22 +204,20 @@ pub(crate) struct ExtractCmd {
 
 impl ExtractCmd {
     /// Executes the extract command on a MEGA file.
-    pub(crate) fn run(&self) {
-        let data = load_file(&self.reader.source);
+    pub(crate) fn run(self) {
+        let mut context = args_to_context(self.reader);
 
-        let mut files_to_extract = HashMap::<MegPathBuf, Vec<FileEntry>>::new();
-        if self.all {
-            for file in parse(self.reader.mega_version, &data).map(unwrap_file_or_exit) {
-                files_to_extract
-                    .entry(file.name().to_owned())
-                    .or_default()
-                    .push(file);
+        let mut files_to_extract = context.read_meg_meta();
+        // If we are extracting all files, leave the full list, otherwise filter it.
+        if !self.all {
+            if self.files.is_empty() {
+                eprintln!("Must specify either a list of MEGA file paths to extract or --all");
+                exit(1);
             }
-        } else if self.files.len() > 0 {
             match self.path_match_mode {
                 PathMatchMode::Literal => {
                     let mut had_errors = false;
-                    let paths_to_extract: HashSet<_> = self
+                    let mut paths_to_extract: BTreeSet<_> = self
                         .files
                         .iter()
                         .filter_map(|file| match MegPath::from_str(file) {
@@ -145,21 +232,13 @@ impl ExtractCmd {
                     if had_errors {
                         exit(1);
                     }
-                    for file in parse(self.reader.mega_version, &data).map(unwrap_file_or_exit) {
-                        if paths_to_extract.contains(file.name().unwrap()) {
-                            files_to_extract
-                                .entry(file.name().unwrap().to_owned())
-                                .or_default()
-                                .push(file);
-                        }
-                    }
-                    let unmatched_paths: BTreeSet<_> = paths_to_extract
-                        .into_iter()
-                        .filter(|&path| !files_to_extract.contains_key(path))
-                        .collect();
-                    if !unmatched_paths.is_empty() {
+                    // We remove matched paths because we currently don't allow setting any option
+                    // to allow MEGA files with duplicate paths, so each path in the MEGA file will
+                    // be unique if we got this far.
+                    files_to_extract.retain(|file| paths_to_extract.remove(file.name()));
+                    if !paths_to_extract.is_empty() {
                         eprintln!("The following paths were not found in the MEGA file:");
-                        for path in unmatched_paths {
+                        for path in paths_to_extract {
                             eprintln!("  {path}");
                         }
                         exit(1);
@@ -197,20 +276,15 @@ impl ExtractCmd {
                             exit(1);
                         }
                     };
-                    for file in parse(self.reader.mega_version, &data).map(unwrap_file_or_exit) {
+                    files_to_extract.retain(|file| {
                         // Like the rust standard library, globset annoyingly has non-configurable
-                        // platform-dependent behavior for how it handles path separators. Before we can
-                        // match anything, we need to first convert all '\\' to '/'. globset runs their
-                        // own normalization, but only on windows.
-                        let path = normalize_path_to_unix(file.raw_name().unwrap());
+                        // platform-dependent behavior for how it handles path separators. Before we
+                        // can match anything, we need to first convert all '\\' to '/'. globset
+                        // runs their own normalization, but only on windows.
+                        let path = normalize_path_to_unix(file.name().as_bytes());
                         let candidate = Candidate::from_bytes(&path);
-                        if globs.is_match_candidate(&candidate) {
-                            files_to_extract
-                                .entry(file.name().unwrap().to_owned())
-                                .or_default()
-                                .push(file);
-                        }
-                    }
+                        globs.is_match_candidate(&candidate)
+                    });
                 }
                 PathMatchMode::Regex => {
                     let regex_set = match RegexSetBuilder::new(&self.files).unicode(false).build() {
@@ -220,20 +294,10 @@ impl ExtractCmd {
                             exit(1);
                         }
                     };
-                    for file in parse(self.reader.mega_version, &data).map(unwrap_file_or_exit) {
-                        if regex_set.is_match(file.raw_name().unwrap()) {
-                            files_to_extract
-                                .entry(file.name().unwrap().to_owned())
-                                .or_default()
-                                .push(file);
-                        }
-                    }
+                    files_to_extract.retain(|file| regex_set.is_match(file.name().as_bytes()));
                 }
             }
-        } else {
-            eprintln!("Must specify either a list of MEGA file paths to extract or --all");
-            exit(1);
-        };
+        }
 
         if files_to_extract.is_empty() {
             eprintln!("Nothing to extract.");
@@ -244,21 +308,16 @@ impl ExtractCmd {
             use std::io::Write;
             {
                 let mut stdout = std::io::stdout().lock();
-                for file in files_to_extract.into_values().flatten() {
-                    let res = writeln!(
-                        stdout,
-                        "{}: {} bytes:",
-                        file.name().unwrap(),
-                        file.contents().len()
-                    );
+                for file in files_to_extract.iter() {
+                    let res = writeln!(stdout, "{}: {} bytes:", file.name(), file.size());
                     if let Err(e) = res {
                         eprintln!("Error writing file information to stdout: {e}");
                         exit(1);
                     }
                     if !self.dry_run {
-                        let res = stdout
-                            .write_all(file.contents())
-                            .and_then(|()| stdout.write_all(b"\n\n"));
+                        let mut segment = context.read_file(file);
+                        let res = io::copy(&mut segment, &mut stdout)
+                            .and_then(|_| stdout.write_all(b"\n\n"));
                         if let Err(e) = res {
                             eprintln!("Error writing file contents to stdout: {e}");
                             exit(1);
@@ -275,25 +334,18 @@ impl ExtractCmd {
                 eprintln!("--out can only be used when extracting a single file");
                 exit(1);
             }
-            // Get the file list.
-            let files_to_extract = files_to_extract.into_values().next().unwrap();
-            if files_to_extract.len() > 1 {
-                eprintln!("--out can only be used when extracting a single file");
-                exit(1);
-            }
-            // Only existing files were added, so the list should not be empty.
             let file = files_to_extract.into_iter().next().unwrap();
 
             if self.dry_run {
                 println!(
                     "Would extract {} bytes from {} to {}",
-                    file.contents().len(),
-                    file.name().unwrap(),
+                    file.size(),
+                    file.name(),
                     out.display()
                 );
             } else {
-                println!("Extracting {} to {}", file.name().unwrap(), out.display());
-                if let Err(e) = std::fs::write(out, file.contents()) {
+                println!("Extracting {} to {}", file.name(), out.display());
+                if let Err(e) = write_to(out, context.read_file(&file)) {
                     eprintln!("Writing to output file {} failed: {e}", out.display());
                     exit(1);
                 }
@@ -306,42 +358,33 @@ impl ExtractCmd {
             Some(dir) => dir,
             None => Path::new(""),
         };
-        for files in files_to_extract.into_values() {
-            for (idx, file) in files.iter().enumerate() {
-                let mut out_path = file.name().unwrap().to_path_buf();
-                self.convert_case_mode.convert(&mut out_path);
-                if files.len() > 1 {
-                    out_path.add_extension(format!("{idx}"));
-                }
-                let out_path = base_path.join(out_path);
-                if self.dry_run {
-                    println!(
-                        "Would extract {} bytes from {} to {}",
-                        file.contents().len(),
-                        file.name().unwrap(),
-                        out_path.display()
-                    );
-                } else {
-                    println!(
-                        "Extracting {} to {}",
-                        file.name().unwrap(),
-                        out_path.display()
-                    );
-                    if let Some(parent) = out_path.parent() {
-                        if let Err(e) = std::fs::create_dir_all(parent) {
-                            eprintln!(
-                                "Failed to create output directory {}: {e}",
-                                parent.display()
-                            );
-                            eprintln!("Skipping file {}", file.name().unwrap());
-                            continue;
-                        }
-                    }
-                    if let Err(e) = std::fs::write(&out_path, file.contents()) {
-                        eprintln!("Failed to open output file {}: {e}", out_path.display());
-                        eprintln!("Skipping file {}", file.name().unwrap());
+        for file in files_to_extract.iter() {
+            let mut out_path = file.name().to_path_buf();
+            self.convert_case_mode.convert(&mut out_path);
+            let out_path = base_path.join(out_path);
+            if self.dry_run {
+                println!(
+                    "Would extract {} bytes from {} to {}",
+                    file.size(),
+                    file.name(),
+                    out_path.display()
+                );
+            } else {
+                println!("Extracting {} to {}", file.name(), out_path.display());
+                if let Some(parent) = out_path.parent() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        eprintln!(
+                            "Failed to create output directory {}: {e}",
+                            parent.display()
+                        );
+                        eprintln!("Skipping file {}", file.name());
                         continue;
                     }
+                }
+                if let Err(e) = write_to(&out_path, context.read_file(file)) {
+                    eprintln!("Failed to write output file {}: {e}", out_path.display());
+                    eprintln!("Skipping file {}", file.name());
+                    continue;
                 }
             }
         }
@@ -349,58 +392,23 @@ impl ExtractCmd {
     }
 }
 
-fn load_file(path: impl AsRef<Path>) -> Vec<u8> {
-    match std::fs::read(path.as_ref()) {
+/// Converts the args to a
+fn args_to_context(args: ReaderArgs) -> ReadContext {
+    let file = match File::open(&args.source) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!(
-                "Unable to read source file {}: {e}",
-                path.as_ref().display()
-            );
+            eprintln!("Unable to open source file {}: {e}", args.source.display());
             exit(1);
-        }
-    }
-}
-
-fn parse(
-    version: Option<MegVersion>,
-    data: &[u8],
-) -> impl Iterator<Item = Result<FileEntry<'_>, MegReadError>> {
-    let version = version.unwrap_or_else(|| guess_version(data));
-    let iter: Box<dyn Iterator<Item = Result<FileEntry<'_>, MegReadError>>> = match version {
-        MegVersion::V1 => Box::new(parser::parse_v1(data)),
-        MegVersion::V2 => Box::new(parser::parse_v2(data)),
-        v => {
-            eprintln!("MEGA file version {v:?} is not supported");
-            exit(2);
         }
     };
-    iter
-}
 
-/// Try to guess the MEGA file version.
-fn guess_version(data: &[u8]) -> MegVersion {
-    eprintln!("No Meg Version provided, attempting to guess format from file contents");
-    match version::guess_version(data) {
-        Ok(v) => {
-            eprintln!("Detected version {v}");
-            v
-        }
-        Err(e) => {
-            eprintln!("Unable to guess MEGA file version: {e}");
-            exit(1);
-        }
-    }
-}
+    let mut options = MegReadOptions::new();
+    options.set_key(args.key);
 
-/// Extract the file from the result or exit with an error message.
-fn unwrap_file_or_exit<'b>(file: Result<FileEntry<'b>, MegReadError>) -> FileEntry<'b> {
-    match file {
-        Ok(file) => file,
-        Err(e) => {
-            eprintln!("Error while decoding the MEGA file: {e}");
-            exit(1);
-        }
+    ReadContext {
+        mega_version: args.mega_version,
+        file,
+        options,
     }
 }
 
@@ -413,4 +421,10 @@ fn normalize_path_to_unix(path: &[u8]) -> Cow<'_, [u8]> {
         }
     }
     path
+}
+
+fn write_to(path: &Path, mut reader: impl io::Read) -> io::Result<()> {
+    let mut dest = File::create(path)?;
+    io::copy(&mut reader, &mut dest)?;
+    Ok(())
 }

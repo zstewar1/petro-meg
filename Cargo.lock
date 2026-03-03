@@ -306,6 +306,7 @@ dependencies = [
  "globset",
  "petro-meg",
  "regex",
+ "thiserror",
  "tracing-subscriber",
 ]
 
