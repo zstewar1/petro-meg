@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::ops::Range;
 use std::{io, usize};
 
@@ -6,7 +6,7 @@ use byteorder::{LE, ReadBytesExt as _};
 use thiserror::Error;
 use tracing::warn;
 
-use crate::crypto::Key;
+use crate::crypto::{DecryptingReader, Key, round_up_to_block};
 use crate::path::{MegPath, MegPathBuf, MegPathError, WIN_PATH_LIMIT};
 
 mod any_version;
@@ -49,6 +49,11 @@ pub struct MegReadOptions {
     ///
     /// Default: `true`.
     validate_consistent_encryption: bool,
+    /// If true, file readers will be wrapped in a reader which counts bytes read to ensure the
+    /// whole file is complete and returns UnexpectedEof if any contents are missing.
+    ///
+    /// Default: `true`.
+    validate_file_complete: bool,
     /// Encryption key and initial vector used for decrypting V3 MEGA files.
     ///
     /// Default: `None`.
@@ -66,6 +71,7 @@ impl MegReadOptions {
             validate_name_count: true,
             validate_file_start_data_start: true,
             validate_consistent_encryption: true,
+            validate_file_complete: true,
             key: None,
         }
     }
@@ -300,12 +306,10 @@ fn read_meg_meta<S: ReaderState, R: Read>(
             }
             warn!("{err}");
         }
-        // Range cannot overflow since we're going from u32 to u64.
-        let start = record.start as u64;
-        let end = start + record.size as u64;
         files.push(FileEntry {
             name,
-            contents: start..end,
+            start: record.start,
+            size: record.size,
             encrypted: record.encrypted,
         });
     }
@@ -322,8 +326,8 @@ fn read_names<R: Read>(
     let mut names = Vec::with_capacity(num_filenames as usize);
     // Read the number of entries needed to fill the names table.
     for name_index in 0..num_filenames {
-        // All versions use the same u32
-        let name_len = reader.read_u32::<LE>()? as usize;
+        // All versions use the same u16 file name length.
+        let name_len = reader.read_u16::<LE>()? as usize;
         if name_len > WIN_PATH_LIMIT {
             let err = MegReadError::NameTooLong {
                 name_index,
@@ -366,8 +370,10 @@ fn read_unencrypted_file_record<R: Read>(reader: &mut R) -> Result<FileRecord, M
 pub struct FileEntry {
     /// The path/name of the file.
     name: MegPathBuf,
-    /// Range of the original source occupied by this file.
-    contents: Range<u64>,
+    /// Start offset of the this file within the MEGA file.
+    start: u32,
+    /// Size of this file within the MEGA file.
+    size: u32,
     /// Whether this file was encrypted.
     encrypted: bool,
 }
@@ -379,12 +385,122 @@ impl FileEntry {
     }
 
     /// Get the range of the original MEGA file occupied by this file's contents.
-    pub fn contents(&self) -> Range<u64> {
-        self.contents.clone()
+    pub fn range(&self) -> Range<usize> {
+        let start: usize = self
+            .start
+            .try_into()
+            .expect("start was outside the range of usize");
+        let size: usize = self
+            .size
+            .try_into()
+            .expect("size was outside the range of usize");
+        let end = start
+            .checked_add(size)
+            .expect("start+size overflowed usize");
+        start..end
     }
 
     /// Returns true if the file was encrypted.
     pub fn encrypted(&self) -> bool {
         self.encrypted
+    }
+
+    /// Extract this file from the given reader. The provided reader must represent the same MEGA
+    /// file that this FileEntry belongs to.
+    pub fn extract_from<'read, R: Read + Seek + 'read>(
+        &self,
+        mut reader: R,
+        options: &MegReadOptions,
+    ) -> io::Result<FileSegmentReader<'read>> {
+        let new_position = reader.seek(io::SeekFrom::Start(self.start as u64))?;
+        if new_position != self.start as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "Tried to seek to {} but position after seek was {new_position}",
+                    self.start
+                ),
+            ));
+        }
+
+        #[inline(always)]
+        fn maybe_check_len<'read, R: Read + 'read>(
+            reader: io::Take<R>,
+            options: &MegReadOptions,
+        ) -> Box<dyn Read + 'read> {
+            if options.validate_file_complete {
+                Box::new(ReadLenChecker { inner: reader })
+            } else {
+                Box::new(reader)
+            }
+        }
+
+        let reader = if self.encrypted {
+            let Some(ref key) = options.key else {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    MegReadError::MissingKey,
+                ));
+            };
+            let amount_to_read = round_up_to_block(self.size as u64);
+            // The inner 'take' is to grab the correct block contents for the file, rounded up to
+            // the next full block.
+            let reader = reader.take(amount_to_read);
+            // Then we decrypt.
+            let reader = DecryptingReader::new(reader, key);
+            // Then we have to apply another Take to restrict the output to only the portion of the
+            // last block that's actually supposed to be in the file.
+            let reader = reader.take(self.size as u64);
+            maybe_check_len(reader, options)
+        } else {
+            // If its not encrypted we just take the file contents and maybe check the length limit.
+            let reader = reader.take(self.size as u64);
+            maybe_check_len(reader, options)
+        };
+        Ok(FileSegmentReader(reader))
+    }
+}
+
+/// Reads a segment representing a single FileEntry from a reader representing a larger MEGA file.
+pub struct FileSegmentReader<'read>(Box<dyn Read + 'read>);
+
+impl<'read> Read for FileSegmentReader<'read> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf)
+    }
+
+    fn read_vectored(&mut self, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
+        self.0.read_vectored(bufs)
+    }
+
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        self.0.read_to_end(buf)
+    }
+
+    fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
+        self.0.read_to_string(buf)
+    }
+
+    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        self.0.read_exact(buf)
+    }
+}
+
+/// Checks that a read returns the full file contents.
+struct ReadLenChecker<R> {
+    inner: io::Take<R>,
+}
+
+impl<R: Read> Read for ReadLenChecker<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        if read == 0 && self.inner.limit() > 0 {
+            Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Data for this file is incomplete.",
+            ))
+        } else {
+            Ok(read)
+        }
     }
 }

@@ -1,10 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use byteorder::{ByteOrder as _, LE};
 use thiserror::Error;
-
-use crate::path::{WIN_PATH_LIMIT, is_dir_separator, is_valid_component};
 
 /// Identifies the version of a MEGA file.
 #[derive(Clone, Copy, Debug)]

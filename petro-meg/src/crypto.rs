@@ -17,8 +17,8 @@ pub struct Key {
 const BLOCK_SIZE: usize = 16;
 
 /// Rounds the given value up to the next multiple of the block size. Panics on overflow.
-pub(crate) fn round_up_to_block(n: usize) -> usize {
-    n.checked_next_multiple_of(BLOCK_SIZE)
+pub(crate) fn round_up_to_block(n: u64) -> u64 {
+    n.checked_next_multiple_of(BLOCK_SIZE as u64)
         .expect("Rounding up to a multiple of the block size overflowed")
 }
 
@@ -62,8 +62,9 @@ impl<R> DecryptingReader<R> {
     ///
     /// Panics
     pub(crate) fn new_with_capacity(inner: R, key: &Key, capacity: usize) -> Self {
-        let capacity = round_up_to_block(capacity);
-        let buf = Box::new_zeroed_slice(capacity);
+        let capacity = round_up_to_block(capacity as u64);
+        assert!(capacity <= usize::MAX as u64, "Next block size above capacity exceeds uszie max");
+        let buf = Box::new_zeroed_slice(capacity as usize);
         // SAFETY: 0 is always a valid value for u8.
         let buf = unsafe { buf.assume_init() };
         Self {
