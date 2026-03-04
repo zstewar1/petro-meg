@@ -186,7 +186,8 @@ pub enum MegReadError {
 }
 
 /// Trait for implementing MegMetaReader for various MEGA file versions.
-pub trait ReadMegMeta: Sized + private::Sealed {
+#[allow(private_bounds)]
+pub trait ReadMegMeta: Sized + ReadVersion {
     fn read_meg_meta<R: Read>(self, reader: R) -> Result<Vec<FileEntry>, MegReadError> {
         const DEFAULT_OPTIONS: &'static MegReadOptions = &MegReadOptions::new();
         self.read_meg_meta_opt(reader, DEFAULT_OPTIONS)
@@ -199,16 +200,14 @@ pub trait ReadMegMeta: Sized + private::Sealed {
     ) -> Result<Vec<FileEntry>, MegReadError>;
 }
 
-mod private {
-    pub trait Sealed {}
+trait ReadVersion {}
 
-    impl Sealed for crate::version::MegVersion {}
-    impl Sealed for Option<crate::version::MegVersion> {}
-    impl Sealed for crate::version::MegV1 {}
-    impl Sealed for crate::version::MegV2 {}
-    impl Sealed for crate::version::MegV3 {}
-    impl Sealed for crate::version::GuessVersion {}
-}
+impl ReadVersion for crate::version::MegVersion {}
+impl ReadVersion for Option<crate::version::MegVersion> {}
+impl ReadVersion for crate::version::MegV1 {}
+impl ReadVersion for crate::version::MegV2 {}
+impl ReadVersion for crate::version::MegV3 {}
+impl ReadVersion for crate::version::GuessVersion {}
 
 /// Version-specific ReaderState. Provides hooks for version-specific operations.
 trait ReaderState: std::fmt::Debug + Sized {

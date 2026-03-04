@@ -175,6 +175,12 @@ impl MegPath {
         }
         out
     }
+
+    /// Makes this MegPath into a normalized path by converting to ASCII uppercase and switching any
+    /// '/' separators for '\\'.
+    pub const fn make_normalized(&mut self) {
+        make_normalized(&mut self.0)
+    }
 }
 
 impl_path_cmp!(@variants MegPath, MegPath);
@@ -188,15 +194,7 @@ impl Ord for MegPath {
 
 impl Hash for MegPath {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        let mut first = true;
-        for component in self.components() {
-            if !first {
-                // Normalize all path separators.
-                state.write_u8(b'\\');
-            }
-            first = false;
-            component.hash(state);
-        }
+        hash_normalized(&self.0, state);
     }
 }
 
@@ -351,14 +349,7 @@ impl PartialEq<Component> for str {
 
 impl Hash for Component {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        const BLOCK_SIZE: usize = 64;
-        let mut buf = [0u8; BLOCK_SIZE];
-        for chunk in self.0.chunks(BLOCK_SIZE) {
-            let lower = &mut buf[0..chunk.len()];
-            lower.copy_from_slice(chunk);
-            lower.make_ascii_lowercase();
-            state.write(lower);
-        }
+        hash_normalized(&self.0, state);
     }
 }
 
@@ -370,37 +361,10 @@ impl PartialOrd for Component {
 
 impl Ord for Component {
     fn cmp(&self, other: &Self) -> Ordering {
-        const BLOCK_SIZE: usize = 64;
-        let mut lhs_buf = [0u8; BLOCK_SIZE];
-        let mut rhs_buf = [0u8; BLOCK_SIZE];
-        let mut lhs_iter = self.0.chunks(BLOCK_SIZE);
-        let mut rhs_iter = other.0.chunks(BLOCK_SIZE);
-        loop {
-            match (lhs_iter.next(), rhs_iter.next()) {
-                // Both ran out at the same time without finding any differences, so they're equal.
-                (None, None) => return Ordering::Equal,
-                // Left ran out first while being equal up to this point, so right is greater.
-                (None, Some(_)) => return Ordering::Less,
-                // Right ran out first while being equal up to this point, so left is greater.
-                (Some(_), None) => return Ordering::Greater,
-                (Some(lhs_chunk), Some(rhs_chunk)) => {
-                    let lhs_lower = &mut lhs_buf[0..lhs_chunk.len()];
-                    let rhs_lower = &mut rhs_buf[0..rhs_chunk.len()];
-                    lhs_lower.copy_from_slice(lhs_chunk);
-                    rhs_lower.copy_from_slice(rhs_chunk);
-                    lhs_lower.make_ascii_lowercase();
-                    rhs_lower.make_ascii_lowercase();
-                    match (*lhs_lower).cmp(rhs_lower) {
-                        // If this block was equal, try the next pair of blocks.
-                        // Note that Chunks only differes in length at the end. If there is a lenght
-                        // difference the slices won't compare equal. So if we get to Equal, either
-                        // the full slices are equal or these blocks are fully equal.
-                        Ordering::Equal => {}
-                        different => return different,
-                    }
-                }
-            }
-        }
+        self.0
+            .iter()
+            .map(u8::to_ascii_uppercase)
+            .cmp(other.0.iter().map(u8::to_ascii_uppercase))
     }
 }
 
@@ -467,6 +431,22 @@ impl MegPathBuf {
     /// Convert a string into a MEGA path.
     pub fn from_string(string: String) -> Result<Self, MegPathError> {
         Self::from_bytes(string.into_bytes())
+    }
+
+    /// Coerces to a &MegPath slice.
+    pub fn as_path(&self) -> &MegPath {
+        &self
+    }
+
+    /// Extracts the underlying bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+
+    /// Extracts the contents as a string.
+    pub fn into_string(self) -> String {
+        // SAFETY: Since we enforce that the content is ASCII-7, it must be valid UTF-8.
+        unsafe { String::from_utf8_unchecked(self.0) }
     }
 }
 
@@ -581,4 +561,37 @@ pub(crate) fn is_valid_path_chars(chars: &[u8]) -> bool {
     chars
         .iter()
         .all(|&ch| is_dir_separator(ch) || is_valid_component(ch))
+}
+
+/// Normalizes an ascii byte for the MEGA format by converting to uppercase and replacing '/' with
+/// '\\'.
+const fn to_normalized(b: u8) -> u8 {
+    if b == b'/' {
+        b'\\'
+    } else {
+        b.to_ascii_uppercase()
+    }
+}
+
+/// Make a slice of bytes normalized in-place.
+const fn make_normalized(bytes: &mut [u8]) {
+    let mut idx = 0;
+    while idx < bytes.len() {
+        let byte = &mut bytes[idx];
+        *byte = to_normalized(*byte);
+        idx += 1;
+    }
+}
+
+/// Hash the path with the given hasher, normalizing it to ascii uppercase and converting '/' to
+/// '\\'.
+pub(crate) fn hash_normalized<H: std::hash::Hasher>(bytes: &[u8], state: &mut H) {
+    const BLOCK_SIZE: usize = 0x100;
+    let mut buf = [0u8; BLOCK_SIZE];
+    for chunk in bytes.chunks(BLOCK_SIZE) {
+        let norm = &mut buf[..chunk.len()];
+        norm.copy_from_slice(chunk);
+        make_normalized(norm);
+        state.write(norm);
+    }
 }
