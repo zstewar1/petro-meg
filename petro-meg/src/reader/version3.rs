@@ -1,14 +1,14 @@
 use std::io::{self, Read};
 
 use byteorder::{LE, ReadBytesExt as _};
-use tracing::warn;
+use tracing::{trace, warn};
 
 use crate::crypto::DecryptingReader;
+use crate::path::MegPathBuf;
 use crate::reader::{
     FileEntry, FileRecord, ID2, MegReadError, MegReadOptions, ReadMegMeta, ReaderState,
-    read_meg_meta, read_names, read_unencrypted_file_record,
+    read_meg_meta, read_names,
 };
-use crate::path::MegPathBuf;
 use crate::version::MegV3;
 
 impl ReadMegMeta for MegV3 {
@@ -23,6 +23,7 @@ impl ReadMegMeta for MegV3 {
 }
 
 /// Internal state of V3 MEGA file reads.
+#[derive(Debug)]
 pub(crate) struct ReadStateV3 {
     /// Whether this reader is encrypted.
     pub(super) encrypted: bool,
@@ -123,18 +124,18 @@ impl ReaderState for ReadStateV3 {
         }
 
         let record = if encrypted {
-            const ENC_RECORD_SIZE: usize = 32;
-            let reader = reader.take(ENC_RECORD_SIZE as u64);
+            const ENC_RECORD_SIZE: u64 = 32;
+            let reader = reader.take(ENC_RECORD_SIZE);
             let Some(ref key) = options.key else {
                 return Err(MegReadError::MissingKey);
             };
             let mut reader = DecryptingReader::new(reader, key);
-            let mut record = read_unencrypted_file_record(&mut reader)?;
-            record.encrypted = true;
+            let record = read_v3_file_record(&mut reader, encrypted)?;
+            trace!("Read record at index {file_index}: {record:?}");
             disacard_leftovers(reader.into_inner())?;
             record
         } else {
-            read_unencrypted_file_record(reader)?
+            read_v3_file_record(reader, encrypted)?
         };
 
         if record.start < self.data_start {
@@ -151,6 +152,25 @@ impl ReaderState for ReadStateV3 {
 
         Ok(record)
     }
+}
+
+/// Reads a V3 file record. Note this does not perform decryption, it just reads the raw record. The
+/// encrypted arg is just for filling in the encrypted field of the record.
+///
+/// Unlike V1 and V2, the name field is only a u16 presumably in order to keep the record the same
+/// size when accounting for the added flags field.
+fn read_v3_file_record<R: Read>(
+    reader: &mut R,
+    encrypted: bool,
+) -> Result<FileRecord, MegReadError> {
+    Ok(FileRecord {
+        encrypted,
+        crc: reader.read_u32::<LE>()?,
+        index: reader.read_u32::<LE>()?,
+        size: reader.read_u32::<LE>()?,
+        start: reader.read_u32::<LE>()?,
+        name: reader.read_u16::<LE>()? as u32,
+    })
 }
 
 /// Discard the leftovers from a 'Take' operation to ensure the underlying reader is positioned in

@@ -1,3 +1,4 @@
+use std::fmt;
 use std::io::{self, BufRead, Read};
 
 use aes::cipher::{BlockDecryptMut as _, KeyIvInit as _};
@@ -5,7 +6,7 @@ use aes::cipher::{BlockDecryptMut as _, KeyIvInit as _};
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
 
 /// AES 128 Key and Initial Vector used to decrypt encrypted V3 files.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Key {
     /// 16 bit AES key.
     key: [u8; 16],
@@ -17,6 +18,36 @@ impl Key {
     /// Create a new key from the key bytes and initial vector.
     pub fn new(key: [u8; 16], iv: [u8; 16]) -> Self {
         Self { key, iv }
+    }
+}
+
+impl fmt::Debug for Key {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Key")
+            .field("key", HexDebug::from(&self.key))
+            .field("iv", HexDebug::from(&self.iv))
+            .finish()
+    }
+}
+
+/// Debug Prints a slice of bytes as hex.
+#[derive(Copy, Clone)]
+#[repr(transparent)]
+struct HexDebug([u8; 16]);
+
+impl HexDebug {
+    fn from(value: &[u8; 16]) -> &Self {
+        // SAFETY: both are Copy, non-Drop and have the same repr.
+        unsafe { std::mem::transmute(value) }
+    }
+}
+
+impl fmt::Debug for HexDebug {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for val in self.0 {
+            write!(f, "{val:02X}")?;
+        }
+        Ok(())
     }
 }
 

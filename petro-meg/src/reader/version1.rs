@@ -4,7 +4,7 @@ use byteorder::{LE, ReadBytesExt as _};
 
 use crate::reader::{
     FileEntry, MegReadError, MegReadOptions, ReadMegMeta, ReaderState,
-    read_unencrypted_file_record, read_meg_meta,
+    read_v1v2_file_record, read_meg_meta,
 };
 use crate::version::MegV1;
 
@@ -20,6 +20,7 @@ impl ReadMegMeta for MegV1 {
 }
 
 /// Internal state of V1 MEGA file reads.
+#[derive(Debug)]
 pub(crate) struct ReadStateV1 {
     /// Number of file names in the filenames table.
     pub(super) num_filenames: u32,
@@ -54,6 +55,6 @@ impl ReaderState for ReadStateV1 {
         _: &MegReadOptions,
         _index: u32,
     ) -> Result<super::FileRecord, MegReadError> {
-        read_unencrypted_file_record(reader)
+        read_v1v2_file_record(reader)
     }
 }

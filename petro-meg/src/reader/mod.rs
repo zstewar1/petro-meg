@@ -4,7 +4,7 @@ use std::{io, usize};
 
 use byteorder::{LE, ReadBytesExt as _};
 use thiserror::Error;
-use tracing::warn;
+use tracing::{instrument, trace, warn};
 
 use crate::crypto::{DecryptingReader, Key, round_up_to_block};
 use crate::path::{MegPath, MegPathBuf, MegPathError, WIN_PATH_LIMIT};
@@ -211,7 +211,7 @@ mod private {
 }
 
 /// Version-specific ReaderState. Provides hooks for version-specific operations.
-trait ReaderState: Sized {
+trait ReaderState: std::fmt::Debug + Sized {
     /// Gets the number of filename entries in the filenames table.
     fn num_filenames(&self) -> u32;
 
@@ -239,6 +239,7 @@ trait ReaderState: Sized {
 }
 
 /// A raw file record, not yet interpreted.
+#[derive(Debug)]
 struct FileRecord {
     /// Encryption flag. Only used by V3 files.
     encrypted: bool,
@@ -254,11 +255,14 @@ struct FileRecord {
     name: u32,
 }
 
+#[instrument(skip_all)]
 fn read_meg_meta<S: ReaderState, R: Read>(
     state: S,
     mut reader: R,
     options: &MegReadOptions,
 ) -> Result<Vec<FileEntry>, MegReadError> {
+    trace!("Read Options: {options:?}");
+    trace!("Header Read: {state:?}");
     if state.num_filenames() != state.num_files() {
         let err = MegReadError::NameFileCountMismatch {
             num_filenames: state.num_filenames(),
@@ -356,13 +360,16 @@ fn read_names<R: Read>(
                 });
             }
         };
+        trace!("Read name at index {name_index}: {name}");
         names.push(Some(name));
     }
     Ok(names)
 }
 
 /// Common implementation for read_file_record for both V1 and V2 MEGA files.
-fn read_unencrypted_file_record<R: Read>(reader: &mut R) -> Result<FileRecord, MegReadError> {
+///
+/// V1 and V2 are never encrypted and use a 32 bit name field.
+fn read_v1v2_file_record<R: Read>(reader: &mut R) -> Result<FileRecord, MegReadError> {
     Ok(FileRecord {
         encrypted: false,
         crc: reader.read_u32::<LE>()?,

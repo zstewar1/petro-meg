@@ -5,7 +5,7 @@ use tracing::warn;
 
 use crate::reader::{
     FileEntry, ID2, MegReadError, MegReadOptions, ReadMegMeta, ReaderState, read_meg_meta,
-    read_unencrypted_file_record,
+    read_v1v2_file_record,
 };
 use crate::version::MegV2;
 
@@ -21,6 +21,7 @@ impl ReadMegMeta for MegV2 {
 }
 
 /// Internal state of V2 MEGA file reads.
+#[derive(Debug)]
 pub(crate) struct ReadStateV2 {
     /// Start offset of file data.
     pub(super) data_start: u32,
@@ -63,7 +64,7 @@ impl ReaderState for ReadStateV2 {
         options: &MegReadOptions,
         file_index: u32,
     ) -> Result<super::FileRecord, MegReadError> {
-        let record = read_unencrypted_file_record(reader)?;
+        let record = read_v1v2_file_record(reader)?;
         if record.start < self.data_start {
             let err = MegReadError::FileBelowDataStart {
                 file_index,
