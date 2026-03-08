@@ -3,6 +3,14 @@ name = "petro-meg"
 version = "1.0.0"
 rust-version = "1.92"
 edition = "2024"
+description = "Reader and Writer for Petroglyph MEGA file format."
+license.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/petro-meg"
+homepage = "https://docs.rs/petro-meg"
+repository = "https://github.com/zstewar1/petro-meg"
 
 [dependencies]
 aes = "0.8.4"
