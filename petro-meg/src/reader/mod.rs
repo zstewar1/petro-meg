@@ -1,3 +1,5 @@
+//! Implements MEGA file reading.
+
 use std::io::{Read, Seek};
 use std::ops::Range;
 use std::{io, usize};
@@ -14,7 +16,7 @@ mod version1;
 mod version2;
 mod version3;
 
-pub const ID2: u32 = 0x3F7D70A4;
+pub(crate) const ID2: u32 = 0x3F7D70A4;
 
 /// Parser options for the MEGA file parser.
 #[derive(Debug, Clone)]
@@ -77,6 +79,8 @@ impl MegReadOptions {
     }
 
     /// Set the crypto key used for reading.
+    ///
+    /// The key is unused in V1 and V2 files. V3 files can be encrypted, and require a key to read.
     pub const fn set_key(&mut self, key: Option<Key>) -> &mut Self {
         self.key = key;
         self

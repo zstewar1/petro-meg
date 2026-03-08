@@ -47,7 +47,7 @@ enum ParseKeyError {
     InvalidIV(ParseIntError),
 }
 
-/// Parse a MEGA file key out of a string consisting of <HEX KEY>:<HEX IV>
+/// Parse a MEGA file key out of a string consisting of `<HEX KEY>:<HEX IV>`
 fn parse_key(s: &str) -> Result<Key, ParseKeyError> {
     let s = s.trim();
     let mut split = s.split(':');

@@ -1,10 +1,14 @@
+//! Proives types for selecting different MEGA file versions.
+
 use std::fmt;
 use std::str::FromStr;
 
 use thiserror::Error;
 
-/// Identifies the version of a MEGA file.
-#[derive(Clone, Copy, Debug)]
+/// Identifies any MEGA file version.
+///
+/// Allows dynamically selecting a MEGA file version at runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MegVersion {
     /// V1 MEGA file used for Empire at War/Forces of Corruption and Universe at War
     V1,
@@ -16,11 +20,30 @@ pub enum MegVersion {
 
 impl fmt::Display for MegVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
+        let s = match self {
             MegVersion::V1 => "v1",
             MegVersion::V2 => "v2",
             MegVersion::V3 => "v3",
-        })
+        };
+        fmt::Display::fmt(s, f)
+    }
+}
+
+impl From<MegV1> for MegVersion {
+    fn from(_: MegV1) -> Self {
+        MegVersion::V1
+    }
+}
+
+impl From<MegV2> for MegVersion {
+    fn from(_: MegV2) -> Self {
+        MegVersion::V2
+    }
+}
+
+impl From<MegV3> for MegVersion {
+    fn from(_: MegV3) -> Self {
+        MegVersion::V3
     }
 }
 
@@ -47,21 +70,47 @@ fn version_char_to_num(ch: u8) -> Result<MegVersion, InvalidMegVersion> {
     })
 }
 
-/// Allows generically selecing to parse a V1 MEGA file.
-#[derive(Default)]
+/// Identifies MEGA file version 1.
+///
+/// Allows generically selecing a MEGA file version at compile time.
+#[derive(Default, Debug)]
 pub struct MegV1;
 
-/// Allows generically selecing to parse a V2 MEGA file.
-#[derive(Default)]
+impl fmt::Display for MegV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt("v1", f)
+    }
+}
+
+/// Identifies MEGA file version 2.
+///
+/// Allows generically selecing a MEGA file version at compile time.
+#[derive(Default, Debug)]
 pub struct MegV2;
 
-/// Allows generically selecing to parse a V3 MEGA file.
-#[derive(Default)]
+impl fmt::Display for MegV2 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt("v2", f)
+    }
+}
+
+/// Identifies MEGA file version 3.
+///
+/// Allows generically selecing a MEGA file version at compile time.
+#[derive(Default, Debug)]
 pub struct MegV3;
 
-/// A "version selector" which tells the parser to guess which parser version to use. Not usable for
-/// encoding.
-#[derive(Default)]
+impl fmt::Display for MegV3 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt("v3", f)
+    }
+}
+
+/// Acts like a MEGA file version, but only for reading, not writing.
+///
+/// Its implementation of [`ReadMegMeta`][crate::reader::ReadMegMeta] uses heuristics to try to
+/// guess the MEGA file version from the headers.
+#[derive(Default, Debug)]
 pub struct GuessVersion;
 
 /// Error returned when the MEGA file version isn't recognized.

@@ -1,8 +1,11 @@
 use std::io;
 
+use tracing::warn;
+
+use crate::crypto::Key;
 use crate::version::{MegV1, MegV2, MegVersion};
-use crate::writer::version3::BuildV3Settings;
-use crate::writer::{BuildMeg, MegBuilder, WriteVersion};
+use crate::writer::version3::V3Settings;
+use crate::writer::{BuildMeg, MegBuilder, WriteEncrypted, WriteVersion};
 
 impl BuildMeg for MegVersion {
     type Settings = AnyVersionSettings;
@@ -15,10 +18,18 @@ impl BuildMeg for MegVersion {
     }
 }
 
-/// WriteVersion that allows writing any MEGA file version.
+/// Stores version-specific writer settings for any MEGA file version.
+///
+/// You should generally not need to interact with this type directly. When you create a
+/// [`MegBuilder`] with [`MegVersion::builder`], it will have the type `MegBuilder<F,
+/// AnyVersionSettings>`. All relevant functionality related to the version-specific settings is
+/// exposed as inherent methods on `MegBuilder`.
+///
+/// `AnyVersionSettings`, enables the [`MegBuilder::set_version`] and [`MegBuilder::set_encryption`]
+/// methods.
 pub struct AnyVersionSettings {
     version: MegVersion,
-    v3settngs: BuildV3Settings,
+    v3settngs: V3Settings,
 }
 
 impl AnyVersionSettings {
@@ -61,6 +72,9 @@ impl WriteVersion for AnyVersionSettings {
         data_offset: u32,
         names_len: u32,
     ) -> io::Result<()> {
+        if self.version != MegVersion::V3 && self.v3settngs.encryption().is_some() {
+            warn!("Encryption key was set, but version was not V3, so encryption is being ignored");
+        }
         delegate!(
             self,
             write_header,
@@ -92,5 +106,15 @@ impl WriteVersion for AnyVersionSettings {
 
     fn write_file<W: io::Write, R: io::Read>(&self, writer: &mut W, file: R) -> io::Result<u64> {
         delegate!(self, write_file, writer, file)
+    }
+}
+
+impl WriteEncrypted for AnyVersionSettings {
+    fn encryption(&self) -> Option<&Key> {
+        self.v3settngs.encryption()
+    }
+
+    fn set_encryption(&mut self, encryption: Option<Key>) {
+        self.v3settngs.set_encryption(encryption);
     }
 }

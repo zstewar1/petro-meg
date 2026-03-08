@@ -1,7 +1,10 @@
+//! Implements MEGA file writing.
+
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
-use std::io::{self, Read, Write};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Cursor, Read, Seek, Write};
 use std::u32;
 
 use byteorder::{LE, WriteBytesExt as _};
@@ -10,8 +13,10 @@ use thiserror::Error;
 use crate::crypto::Key;
 use crate::path::{MegPath, MegPathBuf, WIN_PATH_LIMIT, hash_normalized};
 use crate::version::MegVersion;
-use crate::writer::any_version::AnyVersionSettings;
 use crate::writer::counter::CountingWriter;
+
+pub use self::any_version::AnyVersionSettings;
+pub use self::version3::V3Settings;
 
 mod any_version;
 mod counter;
@@ -84,7 +89,25 @@ impl<F, V> MegBuilder<F, V> {
         self.files.remove::<CrcPath>(path.borrow().into())
     }
 
+    /// Gets the length limit for MEGA file path names.
+    ///
+    /// The name length limit defaults to 260, based on the traditional Windows path length limit.
+    ///
+    /// If any file name in the builder has a name longer than this limit, [`build`][Self::build]
+    /// will return an error.
+    pub fn name_length_limit(&self) -> u16 {
+        self.name_length_limit
+    }
+
     /// Sets the length limit for MEGA file path names.
+    ///
+    /// The name length limit defaults to 260, based on the traditional Windows path length limit.
+    ///
+    /// If any file name in the builder has a name longer than this limit, [`build`][Self::build]
+    /// will return an error.
+    ///
+    /// The length limit is restricted to a u16 because the MEGA file format encodes path name
+    /// lengths using only 16 bits, so it is not possible to store a name longer than [`u16::MAX`].
     pub fn set_name_length_limit(&mut self, len: u16) {
         self.name_length_limit = len;
     }
@@ -92,6 +115,8 @@ impl<F, V> MegBuilder<F, V> {
 
 impl<F> MegBuilder<F, AnyVersionSettings> {
     /// Updates the MEGA file version that will be used when writing.
+    ///
+    /// If you set to V1 or V2 when encryption was set to `Some`, the encryption will be ignored.
     pub fn set_version(&mut self, version: MegVersion) {
         self.version_settings.set_version(version);
     }
@@ -101,14 +126,28 @@ impl<F, V> MegBuilder<F, V>
 where
     V: WriteEncrypted,
 {
+    /// Gets the encryption for the MEGA file builder.
+    pub fn encryption(&self) -> Option<&Key> {
+        self.version_settings.encryption()
+    }
+
     /// Sets the encryption for the MEGA file builder.
-    pub fn set_encyption(&mut self, encryption: Option<Key>) {
+    ///
+    /// If set to `None`, the file will not use encryption. If set to `Some`, the file will use
+    /// encryption.
+    ///
+    /// This only applies when the version is V3. When the builder is created from [`MegVersion`]
+    /// rather than a specific version struct, using `set_encryption` when the version is V1 or V2
+    /// has no effect.
+    pub fn set_encryption(&mut self, encryption: Option<Key>) {
         self.version_settings.set_encryption(encryption);
     }
 }
 
 impl<F: FileContent, V: WriteVersion> MegBuilder<F, V> {
     /// Build the MEGA file, writing the output to Dest.
+    ///
+    /// If successful, returns the total number of bytes written.
     pub fn build<W: Write>(self, writer: &mut W) -> Result<u64, BuildMegError> {
         let names_start = self.version_settings.header_size();
         let names_len = self.name_records_len()?;
@@ -134,7 +173,7 @@ impl<F: FileContent, V: WriteVersion> MegBuilder<F, V> {
         for file in self.files.values() {
             let start = data_offset?;
 
-            let size = file.len();
+            let size = file.file_len()?;
             if size > u32::MAX as u64 {
                 return Err(BuildMegError::FileTooLarge { size });
             }
@@ -181,13 +220,14 @@ impl<F: FileContent, V: WriteVersion> MegBuilder<F, V> {
             writer.total_written() == files_end as u64,
             "miscalculated file records length"
         );
-        for (idx, file) in self.files.into_values().enumerate() {
+        for (idx, mut file) in self.files.into_values().enumerate() {
             let DataOffset { start, size, step } = data_offsets[idx];
             debug_assert!(
                 writer.total_written() == start as u64,
                 "miscalculated file offset for index {idx}, calculated {start}, actual {}",
                 writer.total_written()
             );
+            file.ensure_at_start()?;
             writer.move_mark();
             let written_size = self.version_settings.write_file(&mut writer, file)?;
             if written_size != size as u64 {
@@ -244,12 +284,91 @@ impl<F: FileContent, V: WriteVersion> MegBuilder<F, V> {
 }
 
 /// Trait for types which can provide the contents for a file entry within a MEGA file.
+///
+/// MEGA files store offsets relative to the start of the MEGA file for the positions of the various
+/// files' inner content. In order to calculate those offsets, we need more than just a `Read`, we
+/// also need to know the length of the file ahead of time, which is what this trait provides with
+/// the [`file_len`][Self::file_len] method.
+///
+/// Pre-calculating the file offsets allows us to avoid needing a [`Seek`]-able
+/// [`Write`r][std::io::Write] when calling [`build`][MegBuilder::build] and allows us to avoid
+/// seeking backwards to try to write the file headers retroactively.
+///
+/// The [`file_len`][Self::file_len] must accurately reflect how many bytes would be written if
+/// copying the complete contents of this [`FileContent`], e.g. using [`std::io::copy`]. Note that
+/// for [`File`] and [`Cursor`], the implementation of [`FileContent`] will rewind the stream.
 pub trait FileContent: Read {
     /// Gets the length of the file's contents. This must accurately reflect the number of bytes
     /// which will be added to the MEGA file for this entry. If the number of bytes written when
     /// copying this content to the output does not match the amount reported, an error will be
-    /// produced.
-    fn len(&self) -> u64;
+    /// returned from [`build`][MegBuilder::build].
+    fn file_len(&self) -> io::Result<u64>;
+
+    /// Ensure that the FileContent is at the correct start position in order to copy the number of
+    /// bytes specified by file_len.
+    fn ensure_at_start(&mut self) -> io::Result<()>;
+}
+
+impl FileContent for &[u8] {
+    fn file_len(&self) -> io::Result<u64> {
+        Ok(self.len() as u64)
+    }
+
+    fn ensure_at_start(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl FileContent for File {
+    fn file_len(&self) -> io::Result<u64> {
+        self.metadata().map(|meta| meta.len())
+    }
+
+    fn ensure_at_start(&mut self) -> io::Result<()> {
+        self.rewind()
+    }
+}
+
+impl<T> FileContent for Cursor<T>
+where
+    T: AsRef<[u8]>,
+{
+    fn file_len(&self) -> io::Result<u64> {
+        Ok(self.get_ref().as_ref().len() as u64)
+    }
+
+    fn ensure_at_start(&mut self) -> io::Result<()> {
+        self.rewind()
+    }
+}
+
+impl<T> FileContent for BufReader<T>
+where
+    T: FileContent,
+{
+    fn file_len(&self) -> io::Result<u64> {
+        self.get_ref().file_len()
+    }
+
+    fn ensure_at_start(&mut self) -> io::Result<()> {
+        // Flush the buffer by consuming all bytes. Neither BufRead nor BufReader provides a public
+        // 'discard buffer' method.
+        self.consume(self.buffer().len());
+        self.get_mut().ensure_at_start()
+    }
+}
+
+impl<T> FileContent for Box<T>
+where
+    T: FileContent,
+{
+    fn file_len(&self) -> io::Result<u64> {
+        T::file_len(self)
+    }
+
+    fn ensure_at_start(&mut self) -> io::Result<()> {
+        T::ensure_at_start(self)
+    }
 }
 
 /// Trait for selecting MEGA file write versions.
@@ -334,6 +453,9 @@ pub trait WriteVersion {
 
 /// Trait for MEGA file version settings that allow configuring an encryption key.
 pub trait WriteEncrypted {
+    /// Get the encryption key set for the builder, if one is used.
+    fn encryption(&self) -> Option<&Key>;
+
     /// Set the encryption key to use, or None to disable encryption.
     fn set_encryption(&mut self, encryption: Option<Key>);
 }

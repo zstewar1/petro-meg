@@ -1,3 +1,5 @@
+//! Provides the [`Key`] type for dealing with encrypted MEGA files.
+
 use std::fmt;
 use std::io::{self, BufRead, Read, Write};
 

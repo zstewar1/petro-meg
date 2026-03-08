@@ -5,23 +5,41 @@ use byteorder::{LE, WriteBytesExt as _};
 use crate::crypto::{EncryptingWriter, Key, round_up_to_block};
 use crate::reader::ID2;
 use crate::version::MegV3;
-use crate::writer::{BuildMeg, MegBuilder, WriteVersion, write_names};
+use crate::writer::{BuildMeg, MegBuilder, WriteEncrypted, WriteVersion, write_names};
 
 impl BuildMeg for MegV3 {
-    type Settings = BuildV3Settings;
+    type Settings = V3Settings;
 
     fn builder<F>(self) -> MegBuilder<F, Self::Settings> {
         MegBuilder::new(Default::default())
     }
 }
 
-/// MegV3 builder settings.
+/// Stores version-specific settings for V3 MEGA files.
+///
+/// You should generally not need to interact with this type directly. When you create a
+/// [`MegBuilder`] with [`MegV3::builder`], it will have the type `MegBuilder<F, V3Settings>`. All
+/// relevant functionality related to the version-specific settings is exposed as inherent methods
+/// on `MegBuilder`.
+///
+/// `V3Settings`, enables the [`MegBuilder::set_encryption`] method.
+
 #[derive(Default)]
-pub struct BuildV3Settings {
+pub struct V3Settings {
     encryption: Option<Key>,
 }
 
-impl WriteVersion for BuildV3Settings {
+impl WriteEncrypted for V3Settings {
+    fn encryption(&self) -> Option<&Key> {
+        self.encryption.as_ref()
+    }
+
+    fn set_encryption(&mut self, encryption: Option<Key>) {
+        self.encryption = encryption;
+    }
+}
+
+impl WriteVersion for V3Settings {
     fn file_limit(&self) -> u32 {
         // For V3 the file limit is lowered to u16 because the name index field has been shortened.
         u16::MAX as u32
@@ -122,9 +140,7 @@ impl WriteVersion for BuildV3Settings {
                 writer.flush()?;
                 Ok(size)
             }
-            None => {
-                io::copy(&mut file, writer)
-            }
+            None => io::copy(&mut file, writer),
         }
     }
 }
