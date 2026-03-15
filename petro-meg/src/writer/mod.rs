@@ -81,6 +81,14 @@ impl<F, V> MegBuilder<F, V> {
         self.files.insert(path.into(), file)
     }
 
+    /// Gets the file at the given path, if any.
+    pub fn get<P>(&self, path: &P) -> Option<&F>
+    where
+        P: Borrow<MegPath>,
+    {
+        self.files.get::<CrcPath>(path.borrow().into())
+    }
+
     /// Remove a file from the MEGA file builder.
     pub fn remove<P>(&mut self, path: &P) -> Option<F>
     where

@@ -1,6 +1,6 @@
 [package]
 name = "petro-meg"
-version = "1.0.0"
+version = "1.0.1"
 rust-version = "1.92"
 edition = "2024"
 description = "Reader and Writer for Petroglyph MEGA file format."

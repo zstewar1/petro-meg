@@ -3,8 +3,8 @@ use std::io::Read;
 use byteorder::{LE, ReadBytesExt as _};
 
 use crate::reader::{
-    FileEntry, MegReadError, MegReadOptions, ReadMegMeta, ReaderState,
-    read_v1v2_file_record, read_meg_meta,
+    FileEntry, MegReadError, MegReadOptions, ReadMegMeta, ReaderState, read_meg_meta,
+    read_v1v2_file_record,
 };
 use crate::version::MegV1;
 

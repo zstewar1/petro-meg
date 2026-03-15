@@ -413,7 +413,7 @@ pub enum MegPathError {
 }
 
 /// Owned container for a [`MegPath`], with the same validation requirements.
-#[derive(Clone, Eq)]
+#[derive(Default, Clone, Eq)]
 pub struct MegPathBuf(Vec<u8>);
 
 impl MegPathBuf {

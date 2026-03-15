@@ -12,7 +12,11 @@ pub(super) struct CountingWriter<W> {
 impl<W> CountingWriter<W> {
     /// Create a new zeroed counting writer.
     pub(super) fn new(inner: W) -> Self {
-        Self { inner, mark: 0, written: 0 }
+        Self {
+            inner,
+            mark: 0,
+            written: 0,
+        }
     }
 
     /// Move the mark to the current position.
