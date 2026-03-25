@@ -6,7 +6,7 @@ use std::io::{self, BufRead, Read, Write};
 use aes::cipher::{BlockDecryptMut as _, BlockEncryptMut as _, KeyIvInit as _};
 
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
-type Aes129CbcEnc = cbc::Encryptor<aes::Aes128>;
+type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
 
 /// AES 128 Key and Initial Vector used to decrypt encrypted V3 files.
 #[derive(Clone)]
@@ -19,7 +19,7 @@ pub struct Key {
 
 impl Key {
     /// Create a new key from the key bytes and initial vector.
-    pub fn new(key: [u8; 16], iv: [u8; 16]) -> Self {
+    pub const fn new(key: [u8; 16], iv: [u8; 16]) -> Self {
         Self { key, iv }
     }
 }
@@ -236,7 +236,7 @@ impl<R: ?Sized + Read> BufRead for DecryptingReader<R> {
 /// If this writer is dropped with unencrypted data still in the buffer, it will panic.
 pub(crate) struct EncryptingWriter<W: ?Sized + Write> {
     /// Encrypter to use to encrypt the file contents.
-    enc: Aes129CbcEnc,
+    enc: Aes128CbcEnc,
     /// Buffer used for encryption. Any complete blocks in the buffer are encrypted. Any incompletel
     /// blocks, which cannot be flushed, are unencrypted.
     buf: Vec<u8>,
@@ -263,7 +263,7 @@ impl<W: Write> EncryptingWriter<W> {
             "Next block size above capacity exceeds uszie max"
         );
         Self {
-            enc: Aes129CbcEnc::new((&key.key).into(), (&key.iv).into()),
+            enc: Aes128CbcEnc::new((&key.key).into(), (&key.iv).into()),
             buf: Vec::with_capacity(capacity as usize),
             panicked: false,
             inner,
@@ -294,6 +294,9 @@ impl<W: ?Sized + Write> EncryptingWriter<W> {
         for _ in 0..needed_fill {
             self.buf.push(needed_fill as u8);
         }
+        // Now encrypt the newly padded block.
+        let block = &mut self.buf[encrypted..block_end];
+        self.enc.encrypt_block_mut(block.into());
     }
 
     /// Encrypt any complete blocks
@@ -383,7 +386,6 @@ impl<W: ?Sized + Write> Write for EncryptingWriter<W> {
         let to_write = buf.len().min(self.available());
         self.buf.extend_from_slice(&buf[..to_write]);
 
-        // If there are any newly-complete blocks available, encrypt them.
         while let next_block_end = already_encrypted + BLOCK_SIZE
             && next_block_end <= self.buf.len()
         {
@@ -415,5 +417,30 @@ impl<W: ?Sized + Write> Drop for EncryptingWriter<W> {
                 )
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_encrypt() {
+        static KEY: Key = Key::new(
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        );
+        let mut inner = Vec::new();
+        let mut enc = EncryptingWriter::new(&mut inner, &KEY);
+        write!(enc, "Hello World!").unwrap();
+        enc.pad();
+        enc.flush().unwrap();
+        drop(enc);
+        assert_eq!(
+            inner,
+            [
+                252, 4, 25, 116, 88, 31, 59, 254, 222, 88, 183, 38, 180, 248, 137, 65
+            ]
+        );
     }
 }
