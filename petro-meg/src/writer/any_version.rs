@@ -33,6 +33,10 @@ pub struct AnyVersionSettings {
 }
 
 impl AnyVersionSettings {
+    pub(super) fn version(&self) -> MegVersion {
+        self.version
+    }
+
     pub(super) fn set_version(&mut self, version: MegVersion) {
         self.version = version;
     }

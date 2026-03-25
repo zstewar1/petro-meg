@@ -122,6 +122,11 @@ impl<F, V> MegBuilder<F, V> {
 }
 
 impl<F> MegBuilder<F, AnyVersionSettings> {
+    /// Gets the currently selected MEGA file version.
+    pub fn version(&self) -> MegVersion {
+        self.version_settings.version()
+    }
+
     /// Updates the MEGA file version that will be used when writing.
     ///
     /// If you set to V1 or V2 when encryption was set to `Some`, the encryption will be ignored.
