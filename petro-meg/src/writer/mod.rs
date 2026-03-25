@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Cursor, Read, Seek, Write};
+use std::iter::FusedIterator;
 use std::u32;
 
 use byteorder::{LE, WriteBytesExt as _};
@@ -118,6 +119,28 @@ impl<F, V> MegBuilder<F, V> {
     /// lengths using only 16 bits, so it is not possible to store a name longer than [`u16::MAX`].
     pub fn set_name_length_limit(&mut self, len: u16) {
         self.name_length_limit = len;
+    }
+
+    /// Get an iterator over the paths and files in this builder.
+    pub fn iter(
+        &self,
+    ) -> impl Iterator<Item = (&MegPath, &F)> + DoubleEndedIterator + ExactSizeIterator + FusedIterator
+    {
+        self.files.iter().map(|(path, file)| (path.as_path(), file))
+    }
+
+    /// Get an iterator over the paths in this builder.
+    pub fn paths(
+        &self,
+    ) -> impl Iterator<Item = &MegPath> + DoubleEndedIterator + ExactSizeIterator + FusedIterator {
+        self.files.keys().map(|path| path.as_path())
+    }
+
+    /// Get an iterator over the files in this builder.
+    pub fn files(
+        &self,
+    ) -> impl Iterator<Item = &F> + DoubleEndedIterator + ExactSizeIterator + FusedIterator {
+        self.files.values()
     }
 }
 
