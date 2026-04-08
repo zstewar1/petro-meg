@@ -11,18 +11,26 @@ use std::u32;
 use byteorder::{LE, WriteBytesExt as _};
 use thiserror::Error;
 
+#[cfg(feature = "v3")]
 use crate::crypto::Key;
 use crate::path::{MegPath, MegPathBuf, WIN_PATH_LIMIT, hash_normalized};
+#[cfg(feature = "dynamic_version")]
 use crate::version::MegVersion;
 use crate::writer::counter::CountingWriter;
 
+#[cfg(feature = "dynamic_version")]
 pub use self::any_version::AnyVersionSettings;
+#[cfg(feature = "v3")]
 pub use self::version3::V3Settings;
 
+#[cfg(feature = "dynamic_version")]
 mod any_version;
 mod counter;
+#[cfg(feature = "v1")]
 mod version1;
+#[cfg(feature = "v2")]
 mod version2;
+#[cfg(feature = "v3")]
 mod version3;
 
 /// Error produced when building a MEGA file.
@@ -144,6 +152,7 @@ impl<F, V> MegBuilder<F, V> {
     }
 }
 
+#[cfg(feature = "dynamic_version")]
 impl<F> MegBuilder<F, AnyVersionSettings> {
     /// Gets the currently selected MEGA file version.
     pub fn version(&self) -> MegVersion {
@@ -158,6 +167,7 @@ impl<F> MegBuilder<F, AnyVersionSettings> {
     }
 }
 
+#[cfg(feature = "v3")]
 impl<F, V> MegBuilder<F, V>
 where
     V: WriteEncrypted,
@@ -419,9 +429,13 @@ pub trait BuildMeg: Sized + Sealed {
 
 trait Sealed {}
 
+#[cfg(feature = "dynamic_version")]
 impl Sealed for crate::version::MegVersion {}
+#[cfg(feature = "v1")]
 impl Sealed for crate::version::MegV1 {}
+#[cfg(feature = "v2")]
 impl Sealed for crate::version::MegV2 {}
+#[cfg(feature = "v3")]
 impl Sealed for crate::version::MegV3 {}
 
 /// Trait for implementations of
@@ -488,6 +502,7 @@ pub trait WriteVersion {
 }
 
 /// Trait for MEGA file version settings that allow configuring an encryption key.
+#[cfg(feature = "v3")]
 pub trait WriteEncrypted {
     /// Get the encryption key set for the builder, if one is used.
     fn encryption(&self) -> Option<&Key>;

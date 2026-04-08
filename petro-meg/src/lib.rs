@@ -165,8 +165,24 @@
 //! [`set_encryption`][writer::MegBuilder::set_encryption] method which can be used to set an
 //! encryption key to use to encrypt the MEGA file's contents.
 
+#[cfg(all(any(feature = "reader", feature = "writer"), feature = "v3"))]
 pub mod crypto;
 pub mod path;
+#[cfg(all(
+    any(feature = "v1", feature = "v2", feature = "v3"),
+    feature = "reader"
+))]
 pub mod reader;
 pub mod version;
+#[cfg(all(
+    any(feature = "v1", feature = "v2", feature = "v3"),
+    feature = "writer"
+))]
 pub mod writer;
+
+/// Value used for the second ID field.
+#[cfg(all(
+    any(feature = "v2", feature = "v3"),
+    any(feature = "reader", feature = "writer")
+))]
+pub(crate) const ID2: u32 = 0x3F7D70A4;

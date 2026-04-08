@@ -2,7 +2,7 @@ use std::io::{self, Write};
 
 use byteorder::{LE, WriteBytesExt as _};
 
-use crate::reader::ID2;
+use crate::ID2;
 use crate::version::MegV2;
 use crate::writer::{BuildMeg, MegBuilder, WriteVersion};
 

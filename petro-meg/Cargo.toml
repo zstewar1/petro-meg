@@ -1,6 +1,6 @@
 [package]
 name = "petro-meg"
-version = "1.0.4"
+version = "1.0.5"
 rust-version = "1.92"
 edition = "2024"
 description = "Reader and Writer for Petroglyph MEGA file format."
@@ -12,10 +12,19 @@ documentation = "https://docs.rs/petro-meg"
 homepage = "https://docs.rs/petro-meg"
 repository = "https://github.com/zstewar1/petro-meg"
 
+[features]
+default = ["dynamic_version", "reader", "writer"]
+v1 = []
+v2 = []
+v3 = ["dep:aes", "dep:cbc"]
+dynamic_version = ["v1", "v2", "v3"]
+reader = []
+writer = []
+
 [dependencies]
-aes = "0.8.4"
+aes = { version = "0.8.4", optional = true }
 byteorder = "1.5.0"
-cbc = "0.1.2"
+cbc = { version = "0.1.2", optional = true }
 crc32fast = "1.5.0"
 thiserror = "2.0.18"
 tracing = "0.1"

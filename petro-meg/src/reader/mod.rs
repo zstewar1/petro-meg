@@ -8,15 +8,21 @@ use byteorder::{LE, ReadBytesExt as _};
 use thiserror::Error;
 use tracing::{instrument, trace, warn};
 
-use crate::crypto::{DecryptingReader, Key, round_up_to_block};
+#[cfg(feature = "v3")]
+use crate::crypto::{
+    Key,
+    reader::{DecryptingReader, round_up_to_block},
+};
 use crate::path::{MegPath, MegPathBuf, MegPathError, WIN_PATH_LIMIT};
 
+#[cfg(feature = "dynamic_version")]
 mod any_version;
+#[cfg(feature = "v1")]
 mod version1;
+#[cfg(feature = "v2")]
 mod version2;
+#[cfg(feature = "v3")]
 mod version3;
-
-pub(crate) const ID2: u32 = 0x3F7D70A4;
 
 /// Parser options for the MEGA file parser.
 #[derive(Debug, Clone)]
@@ -46,16 +52,19 @@ pub struct MegReadOptions {
     /// Validate that file start is above data start.
     ///
     /// Default: `true`.
+    #[cfg(any(feature = "v2", feature = "v3"))]
     validate_file_start_data_start: bool,
     /// Validate that all files in an encrypted file are also encrypted.
     ///
     /// Default: `true`.
+    #[cfg(feature = "v3")]
     validate_consistent_encryption: bool,
     /// If true, file readers will be wrapped in a reader which counts bytes read to ensure the
     /// whole file is complete and returns UnexpectedEof if any contents are missing.
     ///
     /// Default: `true`.
     validate_file_complete: bool,
+    #[cfg(feature = "v3")]
     /// Encryption key and initial vector used for decrypting V3 MEGA files.
     ///
     /// Default: `None`.
@@ -71,19 +80,33 @@ impl MegReadOptions {
             validate_name_length: true,
             validate_names_unique: true,
             validate_name_count: true,
+            #[cfg(any(feature = "v2", feature = "v3"))]
             validate_file_start_data_start: true,
+            #[cfg(feature = "v3")]
             validate_consistent_encryption: true,
             validate_file_complete: true,
+            #[cfg(feature = "v3")]
             key: None,
         }
     }
 
     /// Set the crypto key used for reading.
     ///
-    /// The key is unused in V1 and V2 files. V3 files can be encrypted, and require a key to read.
+    /// The key is unused in V1 and V2 files. V3 files can be encrypted, and may require a key to
+    /// read.
+    #[cfg(feature = "v3")]
     pub const fn set_key(&mut self, key: Option<Key>) -> &mut Self {
         self.key = key;
         self
+    }
+
+    /// Gets the crypto key used for reading.
+    ///
+    /// The key is unused in V1 and V2 files. V3 files can be encrypted, and may require a key to
+    /// read.
+    #[cfg(feature = "v3")]
+    pub const fn key(&self) -> Option<&Key> {
+        self.key.as_ref()
     }
 }
 
@@ -104,6 +127,7 @@ pub enum MegReadError {
     InvalidFileId { id1: u32, id2: u32 },
     /// For V3 only, the header had the 'encrypted' id version/flag but no crypto key was available
     /// in the provided reader options.
+    #[cfg(feature = "v3")]
     #[error(
         "MEGA file header indicated that it was encrypted, but no key was provided to decrypt it"
     )]
@@ -206,11 +230,17 @@ pub trait ReadMegMeta: Sized + ReadVersion {
 
 trait ReadVersion {}
 
+#[cfg(feature = "dynamic_version")]
 impl ReadVersion for crate::version::MegVersion {}
+#[cfg(feature = "dynamic_version")]
 impl ReadVersion for Option<crate::version::MegVersion> {}
+#[cfg(feature = "v1")]
 impl ReadVersion for crate::version::MegV1 {}
+#[cfg(feature = "v2")]
 impl ReadVersion for crate::version::MegV2 {}
+#[cfg(feature = "v3")]
 impl ReadVersion for crate::version::MegV3 {}
+#[cfg(feature = "dynamic_version")]
 impl ReadVersion for crate::version::GuessVersion {}
 
 /// Version-specific ReaderState. Provides hooks for version-specific operations.
@@ -245,6 +275,7 @@ trait ReaderState: std::fmt::Debug + Sized {
 #[derive(Debug)]
 struct FileRecord {
     /// Encryption flag. Only used by V3 files.
+    #[cfg(feature = "v3")]
     encrypted: bool,
     /// CRC-32 of the filename.
     crc: u32,
@@ -324,6 +355,7 @@ fn read_meg_meta<S: ReaderState, R: Read>(
             name,
             start: record.start,
             size: record.size,
+            #[cfg(feature = "v3")]
             encrypted: record.encrypted,
         });
     }
@@ -372,8 +404,10 @@ fn read_names<R: Read>(
 /// Common implementation for read_file_record for both V1 and V2 MEGA files.
 ///
 /// V1 and V2 are never encrypted and use a 32 bit name field.
+#[cfg(any(feature = "v1", feature = "v2"))]
 fn read_v1v2_file_record<R: Read>(reader: &mut R) -> Result<FileRecord, MegReadError> {
     Ok(FileRecord {
+        #[cfg(feature = "v3")]
         encrypted: false,
         crc: reader.read_u32::<LE>()?,
         index: reader.read_u32::<LE>()?,
@@ -392,6 +426,7 @@ pub struct FileEntry {
     /// Size of this file within the MEGA file.
     size: u32,
     /// Whether this file was encrypted.
+    #[cfg(feature = "v3")]
     encrypted: bool,
 }
 
@@ -423,6 +458,7 @@ impl FileEntry {
     }
 
     /// Returns true if the file was encrypted.
+    #[cfg(feature = "v3")]
     pub fn encrypted(&self) -> bool {
         self.encrypted
     }
@@ -457,6 +493,7 @@ impl FileEntry {
             }
         }
 
+        #[cfg(feature = "v3")]
         let reader = if self.encrypted {
             let Some(ref key) = options.key else {
                 return Err(io::Error::new(
@@ -475,6 +512,12 @@ impl FileEntry {
             let reader = reader.take(self.size as u64);
             maybe_check_len(reader, options)
         } else {
+            // If its not encrypted we just take the file contents and maybe check the length limit.
+            let reader = reader.take(self.size as u64);
+            maybe_check_len(reader, options)
+        };
+        #[cfg(not(feature = "v3"))]
+        let reader = {
             // If its not encrypted we just take the file contents and maybe check the length limit.
             let reader = reader.take(self.size as u64);
             maybe_check_len(reader, options)

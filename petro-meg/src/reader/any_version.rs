@@ -2,11 +2,12 @@ use std::io::{self, Read};
 
 use byteorder::{ByteOrder as _, LE, ReadBytesExt as _};
 
+use crate::ID2;
 use crate::path::{WIN_PATH_LIMIT, is_valid_path_chars};
 use crate::reader::version1::ReadStateV1;
 use crate::reader::version2::ReadStateV2;
 use crate::reader::version3::ReadStateV3;
-use crate::reader::{FileEntry, ID2, MegReadError, MegReadOptions, ReadMegMeta, read_meg_meta};
+use crate::reader::{FileEntry, MegReadError, MegReadOptions, ReadMegMeta, read_meg_meta};
 use crate::version::{GuessVersion, MegV1, MegV2, MegV3, MegVersion};
 
 impl ReadMegMeta for GuessVersion {

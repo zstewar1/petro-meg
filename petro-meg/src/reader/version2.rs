@@ -4,9 +4,10 @@ use byteorder::{LE, ReadBytesExt as _};
 use tracing::warn;
 
 use crate::reader::{
-    FileEntry, ID2, MegReadError, MegReadOptions, ReadMegMeta, ReaderState, read_meg_meta,
+    FileEntry, MegReadError, MegReadOptions, ReadMegMeta, ReaderState, read_meg_meta,
     read_v1v2_file_record,
 };
+use crate::ID2;
 use crate::version::MegV2;
 
 impl ReadMegMeta for MegV2 {

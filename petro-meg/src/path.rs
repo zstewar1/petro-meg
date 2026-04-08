@@ -32,6 +32,10 @@ macro_rules! impl_path_cmp {
 }
 
 /// Path length limit for Windows, which we also apply to MEGA paths, in some contexts.
+#[cfg(all(
+    any(feature = "v1", feature = "v2", feature = "v3"),
+    any(feature = "reader", feature = "writer")
+))]
 pub(crate) const WIN_PATH_LIMIT: usize = 260;
 
 /// Represents a path in a Petroglyph MEGA file.
@@ -557,6 +561,7 @@ pub(crate) fn is_valid_component(c: u8) -> bool {
 
 /// Return true if the characters are all valid within MEGA file paths (though not necessarily in
 /// their current positions).
+#[cfg(all(feature = "dynamic_version", feature = "reader"))]
 pub(crate) fn is_valid_path_chars(chars: &[u8]) -> bool {
     chars
         .iter()

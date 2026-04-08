@@ -2,8 +2,9 @@ use std::io::{self, Read, Write};
 
 use byteorder::{LE, WriteBytesExt as _};
 
-use crate::crypto::{EncryptingWriter, Key, round_up_to_block};
-use crate::reader::ID2;
+use crate::crypto::{Key};
+use crate::crypto::writer::{EncryptingWriter, round_up_to_block};
+use crate::ID2;
 use crate::version::MegV3;
 use crate::writer::{BuildMeg, MegBuilder, WriteEncrypted, WriteVersion, write_names};
 

@@ -3,11 +3,12 @@ use std::io::{self, Read};
 use byteorder::{LE, ReadBytesExt as _};
 use tracing::{trace, warn};
 
-use crate::crypto::DecryptingReader;
+use crate::ID2;
+use crate::crypto::reader::DecryptingReader;
 use crate::path::MegPathBuf;
 use crate::reader::{
-    FileEntry, FileRecord, ID2, MegReadError, MegReadOptions, ReadMegMeta, ReaderState,
-    read_meg_meta, read_names,
+    FileEntry, FileRecord, MegReadError, MegReadOptions, ReadMegMeta, ReaderState, read_meg_meta,
+    read_names,
 };
 use crate::version::MegV3;
 
