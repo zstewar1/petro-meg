@@ -4,16 +4,18 @@ use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs::File;
+use std::hash::Hasher;
 use std::io::{self, BufRead, BufReader, Cursor, Read, Seek, Write};
 use std::iter::FusedIterator;
 use std::u32;
 
+use ain::AinChar;
 use byteorder::{LE, WriteBytesExt as _};
 use thiserror::Error;
 
 #[cfg(feature = "v3")]
 use crate::crypto::Key;
-use crate::path::{MegPath, MegPathBuf, WIN_PATH_LIMIT, hash_normalized};
+use crate::path::{MegPath, MegPathBuf, WIN_PATH_LIMIT, to_normalized};
 #[cfg(feature = "dynamic_version")]
 use crate::version::MegVersion;
 use crate::writer::counter::CountingWriter;
@@ -69,7 +71,7 @@ pub enum BuildMegError {
 #[derive(Debug, Default, Clone)]
 pub struct MegBuilder<F, V> {
     version_settings: V,
-    files: BTreeMap<CrcPathBuf, F>,
+    files: BTreeMap<CrcPath<MegPathBuf>, F>,
     /// Name length limit to apply. Defaults to the windows name length limit.
     name_length_limit: u16,
 }
@@ -95,7 +97,7 @@ impl<F, V> MegBuilder<F, V> {
     where
         P: Borrow<MegPath>,
     {
-        self.files.get::<CrcPath>(path.borrow().into())
+        self.files.get(CrcPath::from_borrow(path))
     }
 
     /// Remove a file from the MEGA file builder.
@@ -103,7 +105,7 @@ impl<F, V> MegBuilder<F, V> {
     where
         P: Borrow<MegPath>,
     {
-        self.files.remove::<CrcPath>(path.borrow().into())
+        self.files.remove(CrcPath::from_borrow(path))
     }
 
     /// Gets the length limit for MEGA file path names.
@@ -140,7 +142,8 @@ impl<F, V> MegBuilder<F, V> {
     /// Get an iterator over the paths in this builder.
     pub fn paths(
         &self,
-    ) -> impl Iterator<Item = &MegPath> + DoubleEndedIterator + ExactSizeIterator + FusedIterator {
+    ) -> impl Iterator<Item = &MegPath> + DoubleEndedIterator + ExactSizeIterator + FusedIterator
+    {
         self.files.keys().map(|path| path.as_path())
     }
 
@@ -251,13 +254,13 @@ impl<F: FileContent, V: WriteVersion> MegBuilder<F, V> {
             "miscalculated header length"
         );
         self.version_settings
-            .write_names(&mut writer, self.files.keys().map(CrcPathBuf::as_path))?;
+            .write_names(&mut writer, self.files.keys().map(CrcPath::as_path))?;
         debug_assert!(
             writer.total_written() == names_end as u64,
             "miscalculated names length"
         );
         for (idx, name) in self.files.keys().enumerate() {
-            let crc = crc32fast::hash(name.as_path().as_bytes());
+            let crc = name.crc();
             let DataOffset { start, size, .. } = data_offsets[idx];
             self.version_settings
                 .write_file_record(&mut writer, crc, idx as u32, start, size)?;
@@ -542,80 +545,113 @@ fn write_v1v2_file_record<W: Write>(
     Ok(())
 }
 
-/// Implements ordering based on the CRC-32 of the path. Enforces normalization.
-///
-/// Since we enforce normalization, PartialEq can just be derived, as equal values will yield equal
-/// CRC32s.
-#[derive(PartialEq, Eq, Debug, Clone)]
+/// Wraps a [`Borrow<MegPath>`][MegPath] type to make it implement `PartialOrd` and `Ord` based on
+/// the crc32 hash of the normalized form of the path.
+#[derive(Debug, Copy, Clone)]
 #[repr(transparent)]
-struct CrcPathBuf(MegPathBuf);
+struct CrcPath<T: ?Sized> {
+    // We can't cache the path because we need repr(transparent) in order to be able to implement
+    // borrow.
+    path: T,
+}
 
-impl CrcPathBuf {
-    /// Gets the normalized path.
+impl CrcPath<MegPath> {
+    fn from_borrow<P: Borrow<MegPath>>(path: &P) -> &Self {
+        let path = path.borrow();
+        // SAFETY: CrcPath is repr(transparent) so this cast and deref is safe.
+        let ptr = path as *const MegPath as *const CrcPath<MegPath>;
+        unsafe { &*ptr }
+    }
+}
+
+impl<T: ?Sized + Borrow<MegPath>> CrcPath<T> {
+    /// Views this CrcPath as a [`MegPath`].
     fn as_path(&self) -> &MegPath {
-        &self.0
+        self.path.borrow()
+    }
+
+    /// Gets a view of the slice of characters that make up the path.
+    fn as_ain_slice(&self) -> &[AinChar] {
+        self.path.borrow().as_ain_str().as_slice()
+    }
+
+    /// Gets the crc32 hash of the contained path.
+    fn crc(&self) -> u32 {
+        const BUF_SIZE: usize = 16;
+        let mut state = crc32fast::Hasher::new();
+        let mut buf = [0u8; BUF_SIZE];
+        let (chunks, rest) = self.as_ain_slice().as_chunks::<BUF_SIZE>();
+        for chunk in chunks {
+            for idx in 0..BUF_SIZE {
+                buf[idx] = to_normalized(chunk[idx]).to_u8();
+            }
+            state.write(&buf);
+        }
+        for idx in 0..rest.len() {
+            buf[idx] = to_normalized(rest[idx]).to_u8();
+        }
+        state.write(&buf[..rest.len()]);
+        state.finalize()
+    }
+
+    /// Borrows self as a `CrcPath<MegPath>`.
+    fn as_meg_path(&self) -> &CrcPath<MegPath> {
+        let path = self.path.borrow();
+        // SAFETY: CrcPath is repr(transparent) so this cast and deref is safe.
+        let ptr = path as *const MegPath as *const CrcPath<MegPath>;
+        unsafe { &*ptr }
     }
 }
 
-impl From<MegPathBuf> for CrcPathBuf {
-    fn from(mut value: MegPathBuf) -> Self {
-        value.make_normalized();
-        Self(value)
+impl<T: Borrow<MegPath>> From<T> for CrcPath<T> {
+    fn from(path: T) -> Self {
+        Self { path }
     }
 }
 
-impl PartialOrd for CrcPathBuf {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+impl<T, U> PartialEq<CrcPath<U>> for CrcPath<T>
+where
+    T: ?Sized + Borrow<MegPath>,
+    U: ?Sized + Borrow<MegPath>,
+{
+    fn eq(&self, other: &CrcPath<U>) -> bool {
+        PartialEq::eq(self.path.borrow(), other.path.borrow())
     }
 }
 
-impl Ord for CrcPathBuf {
+impl<T: ?Sized + Borrow<MegPath>> Eq for CrcPath<T> {}
+
+impl<T, U> PartialOrd<CrcPath<U>> for CrcPath<T>
+where
+    T: ?Sized + Borrow<MegPath>,
+    U: ?Sized + Borrow<MegPath>,
+{
+    fn partial_cmp(&self, other: &CrcPath<U>) -> Option<Ordering> {
+        Some(crc_cmp_impl(self.as_meg_path(), other.as_meg_path()))
+    }
+}
+
+impl<T: ?Sized + Borrow<MegPath>> Ord for CrcPath<T> {
     fn cmp(&self, other: &Self) -> Ordering {
-        crc32fast::hash(self.0.as_bytes())
-            .cmp(&crc32fast::hash(other.0.as_bytes()))
-            .then_with(|| self.0.cmp(&other.0))
+        crc_cmp_impl(self.as_meg_path(), other.as_meg_path())
     }
 }
 
-impl Borrow<CrcPath> for CrcPathBuf {
-    fn borrow(&self) -> &CrcPath {
-        self.0.as_path().into()
+// This just squeaks through coherence thanks to the Sized bound; CrcPath<MegPath> is unsized and
+// gets the reflexive/default Borrow impl.
+impl<T: Borrow<MegPath>> Borrow<CrcPath<MegPath>> for CrcPath<T> {
+    fn borrow(&self) -> &CrcPath<MegPath> {
+        self.as_meg_path()
     }
 }
 
-/// Wraps a MegPath to make it implement PartialEq and Ord with CrcPathBuf as if it was normalized.
-///
-/// Like CrcPathBuf, we can derive PartialEq and Eq.
-#[derive(PartialEq, Eq, Debug)]
-#[repr(transparent)]
-struct CrcPath(MegPath);
-
-impl From<&MegPath> for &CrcPath {
-    fn from(value: &MegPath) -> Self {
-        // SAFETY: Reprs are identical.
-        unsafe { std::mem::transmute(value) }
-    }
-}
-
-impl PartialOrd for CrcPath {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for CrcPath {
-    fn cmp(&self, other: &Self) -> Ordering {
-        crc32_normalized(self.0.as_bytes())
-            .cmp(&&crc32_normalized(other.0.as_bytes()))
-            .then_with(|| self.0.cmp(&other.0))
-    }
-}
-
-fn crc32_normalized(bytes: &[u8]) -> u32 {
-    let mut state = crc32fast::Hasher::new();
-    hash_normalized(bytes, &mut state);
-    state.finalize()
+/// Implements CRC 32 hash-based ordering.
+fn crc_cmp_impl(lhs: &CrcPath<MegPath>, rhs: &CrcPath<MegPath>) -> Ordering {
+    // Compare CRC codes first, then break ties in the case of hash collisions with the actual path
+    // value.
+    lhs.crc()
+        .cmp(&rhs.crc())
+        .then_with(|| lhs.path.cmp(&rhs.path))
 }
 
 /// Gets the number of bytes needed for the given name's name record. Errors if the name exceeds the
@@ -630,5 +666,35 @@ fn name_record_len(name: &MegPath, limit: u16) -> Result<u32, BuildMegError> {
         // Add the 2 bytes needed for the length field of the name record.
         let record_len = size_of::<u16>() + name.len();
         Ok(record_len as u32)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use ain::{AinStr, ain};
+
+    #[test]
+    fn crc_matches() {
+        const PAIRS: &[(&AinStr, &[u8])] = &[
+            (
+                ain!("some/path/with/forward/slashes/over/the/buffer/size"),
+                b"SOME\\PATH\\WITH\\FORWARD\\SLASHES\\OVER\\THE\\BUFFER\\SIZE",
+            ),
+            (ain!(""), b""),
+            (ain!("Partially\\Normed"), b"PARTIALLY\\NORMED"),
+            (ain!("shorter"), b"SHORTER"),
+        ];
+
+        for (s, norm) in PAIRS {
+            let path = MegPath::from_ain_str(s).unwrap();
+            let crc_path = CrcPath::from_borrow(&path);
+            let crc_path_buf = CrcPath::from(path.to_owned());
+
+            let expected_byte_res = crc32fast::hash(norm);
+            assert_eq!(crc_path.crc(), expected_byte_res);
+            assert_eq!(crc_path_buf.crc(), expected_byte_res);
+        }
     }
 }
