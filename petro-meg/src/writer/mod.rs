@@ -580,7 +580,7 @@ impl Ord for CrcPathBuf {
 
 impl Borrow<CrcPath> for CrcPathBuf {
     fn borrow(&self) -> &CrcPath {
-        self.0.as_path().into()
+        self.0.as_meg_path().into()
     }
 }
 

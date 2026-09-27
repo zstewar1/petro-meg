@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::hash::Hash;
 use std::ops::{Deref, DerefMut};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use thiserror::Error;
@@ -144,6 +144,11 @@ impl MegPath {
         &self.0
     }
 
+    /// Gets this [MegPath] as a [Path]
+    pub fn as_path(&self) -> &Path {
+        Path::new(self.as_str())
+    }
+
     /// Get an iterator over the [`Components`] of this [`MegPath`].
     pub fn components(&self) -> Components<'_> {
         Components { path: &self.0 }
@@ -205,6 +210,12 @@ impl Hash for MegPath {
 impl AsRef<str> for MegPath {
     fn as_ref(&self) -> &str {
         self.as_str()
+    }
+}
+
+impl AsRef<Path> for MegPath {
+    fn as_ref(&self) -> &Path {
+        self.as_path()
     }
 }
 
@@ -438,7 +449,7 @@ impl MegPathBuf {
     }
 
     /// Coerces to a &MegPath slice.
-    pub fn as_path(&self) -> &MegPath {
+    pub fn as_meg_path(&self) -> &MegPath {
         &self
     }
 
@@ -511,7 +522,25 @@ impl Borrow<MegPath> for MegPathBuf {
     }
 }
 
+impl Borrow<MegPath> for &MegPathBuf {
+    fn borrow(&self) -> &MegPath {
+        self
+    }
+}
+
 impl BorrowMut<MegPath> for MegPathBuf {
+    fn borrow_mut(&mut self) -> &mut MegPath {
+        self
+    }
+}
+
+impl Borrow<MegPath> for &mut MegPathBuf {
+    fn borrow(&self) -> &MegPath {
+        self
+    }
+}
+
+impl BorrowMut<MegPath> for &mut MegPathBuf {
     fn borrow_mut(&mut self) -> &mut MegPath {
         self
     }
@@ -520,6 +549,12 @@ impl BorrowMut<MegPath> for MegPathBuf {
 impl AsRef<str> for MegPathBuf {
     fn as_ref(&self) -> &str {
         self.as_str()
+    }
+}
+
+impl AsRef<Path> for MegPathBuf {
+    fn as_ref(&self) -> &Path {
+        self.as_path()
     }
 }
 
