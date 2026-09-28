@@ -5,9 +5,10 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::hash::Hash;
 use std::ops::{Deref, DerefMut};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 
+use ain::{AinChar, AinStr};
 use thiserror::Error;
 
 macro_rules! impl_path_cmp {
@@ -69,7 +70,7 @@ pub(crate) const WIN_PATH_LIMIT: usize = 260;
 /// Because MegPaths are ASCII only, they can be safely converted to `&str`.
 #[derive(Eq)]
 #[repr(transparent)]
-pub struct MegPath([u8]);
+pub struct MegPath(AinStr);
 
 impl MegPath {
     /// An empty MegPath with no components.
@@ -82,7 +83,8 @@ impl MegPath {
     const unsafe fn from_bytes_unchecked<'a>(bytes: &'a [u8]) -> &'a Self {
         // SAFETY: the layouts, lifetimes, and mutability are the same. Caller is responsible for
         // enforcing path validity.
-        unsafe { std::mem::transmute::<&'a [u8], &'a MegPath>(bytes) }
+        let ptr = bytes as *const [u8] as *const MegPath;
+        unsafe { &*ptr }
     }
 
     /// Converts bytes to a mutable MegPath without checking that it is a valid path.
@@ -91,7 +93,8 @@ impl MegPath {
     unsafe fn from_bytes_unchecked_mut<'a>(bytes: &'a mut [u8]) -> &'a mut Self {
         // SAFETY: the layouts, lifetimes, and mutability are the same. Caller is responsible for
         // enforcing path validity.
-        unsafe { std::mem::transmute::<&'a mut [u8], &'a mut MegPath>(bytes) }
+        let ptr = bytes as *mut [u8] as *mut MegPath;
+        unsafe { &mut *ptr }
     }
 
     /// Convert bytes to a MegPath.
@@ -135,18 +138,12 @@ impl MegPath {
     /// This always succeeds because 7-bit ascii is always safe to convert to str without further
     /// validation.
     pub fn as_str(&self) -> &str {
-        // SAFETY: we require components to be ASCII-7, which is always valid UTF-8
-        unsafe { str::from_utf8_unchecked(&self.0) }
+        self.0.as_str()
     }
 
     /// Get the bytes of the path.
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-
-    /// Gets this [MegPath] as a [Path]
-    pub fn as_path(&self) -> &Path {
-        Path::new(self.as_str())
+        self.0.as_bytes()
     }
 
     /// Get an iterator over the [`Components`] of this [`MegPath`].
@@ -158,20 +155,22 @@ impl MegPath {
     ///
     /// Since trailing slashes are not allowed and we don't allow drive letters, this is always Some
     /// unless the path is empty.
-    pub fn file_name(&self) -> Option<&Component> {
+    pub fn file_name(&self) -> Option<&AinStr> {
         if self.is_empty() {
             None
         } else {
             // Since our paths are restricted, this check is relatively easy.
-            let name_start = match self.0.iter().rposition(|&b| is_dir_separator(b)) {
+            let name_start = match self.0.chars().rposition(|b| is_dir_separator(b.to_u8())) {
                 Some(idx) => idx + 1,
                 None => 0,
             };
-            let slice = &self.0[name_start..];
-            // SAFETY: The MegPath is already validated and either it contained no dir separators or
-            // we sliced to only the content after the last dir separator.
-            Some(unsafe { Component::from_bytes_unchecked(slice) })
+            Some(&self.0[name_start..])
         }
+    }
+
+    /// Get the file extension, if any.
+    pub fn extension(&self) -> Option<&Component> {
+        stdutil::extension(self.file_name())
     }
 
     /// Creates a PathBuf with the components of this [`MegPath`].
@@ -213,12 +212,6 @@ impl AsRef<str> for MegPath {
     }
 }
 
-impl AsRef<Path> for MegPath {
-    fn as_ref(&self) -> &Path {
-        self.as_path()
-    }
-}
-
 impl ToOwned for MegPath {
     type Owned = MegPathBuf;
 
@@ -246,7 +239,7 @@ impl fmt::Display for MegPath {
 /// Components of a [`MegPath`].
 pub struct Components<'a> {
     /// Remaining MegPath to return components for.
-    path: &'a [u8],
+    path: &'a AinStr,
 }
 
 impl<'a> Iterator for Components<'a> {
@@ -302,13 +295,13 @@ fn validate_path(bytes: &[u8]) -> Result<(), MegPathError> {
 
 /// Splits bytes representing a MEGA file path at the next separator '/' or '\', without checking
 /// component produced is valid. Returns a tuple of (new component, remaining path)
-fn split_next_component_unchecked(path: &[u8]) -> (&[u8], &[u8]) {
-    let split_point = path.iter().copied().position(is_dir_separator);
+fn split_next_component_unchecked(path: &AinStr) -> (&AinStr, &AinStr) {
+    let split_point = path.chars().position(is_dir_separator);
     match split_point {
         // separator + 1 is safe because the separator was found at `separator`, so the next
         // index must be no more than `path.len()`.
         Some(separator) => (&path[..separator], &path[separator + 1..]),
-        None => (path, &[]),
+        None => (path, AinStr::EMPTY),
     }
 }
 
@@ -341,6 +334,11 @@ impl Component {
     pub fn as_str(&self) -> &str {
         // SAFETY: we require components to be ASCII-7, which is always valid UTF-8
         unsafe { str::from_utf8_unchecked(&self.0) }
+    }
+
+    /// Get a &[u8] representation of the bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
     }
 }
 
@@ -552,12 +550,6 @@ impl AsRef<str> for MegPathBuf {
     }
 }
 
-impl AsRef<Path> for MegPathBuf {
-    fn as_ref(&self) -> &Path {
-        self.as_path()
-    }
-}
-
 impl fmt::Debug for MegPathBuf {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(self.as_str(), f)
@@ -614,11 +606,12 @@ const fn to_normalized(b: u8) -> u8 {
 }
 
 /// Make a slice of bytes normalized in-place.
-const fn make_normalized(bytes: &mut [u8]) {
+const fn make_normalized(bytes: &mut AinStr) {
+    // Manual loop to allow this to be const-fn
     let mut idx = 0;
     while idx < bytes.len() {
         let byte = &mut bytes[idx];
-        *byte = to_normalized(*byte);
+        *byte = AinChar::new(to_normalized(byte.to_u8()));
         idx += 1;
     }
 }
@@ -633,5 +626,40 @@ pub(crate) fn hash_normalized<H: std::hash::Hasher>(bytes: &[u8], state: &mut H)
         norm.copy_from_slice(chunk);
         make_normalized(norm);
         state.write(norm);
+    }
+}
+
+/// Utility functions which have been borrowed from the Rust standard libary, e.g. std::path under
+/// the terms of the MIT License and modified to work on MegPaths and components.
+mod stdutil {
+    use super::Component;
+
+    /// Copied from [std::path::Path::extension].
+    fn extension(file_name: Option<&Component>) -> Option<&Component> {
+        file_name
+            .map(rsplit_file_at_dot)
+            .and_then(|(before, after)| before.and(after))
+    }
+
+    /// basic workhorse for splitting stem and extension
+    fn rsplit_file_at_dot(file: &Component) -> (Option<&Component>, Option<&Component>) {
+        if file == ".." {
+            return (Some(file), None);
+        }
+
+        let mut iter = file.as_bytes().rsplitn(2, |b| *b == b'.');
+        let after = iter.next();
+        let before = iter.next();
+        if before == Some(b"") {
+            (Some(file), None)
+        } else {
+            // SAFETY: Both before and after came from an already-validated Component,
+            unsafe {
+                (
+                    before.map(|s| Component::from_bytes_unchecked(s)),
+                    after.map(|s| Component::from_bytes_unchecked(s)),
+                )
+            }
+        }
     }
 }

@@ -23,6 +23,7 @@ writer = []
 
 [dependencies]
 aes = { version = "0.8.4", optional = true }
+ain = "0.1.0"
 byteorder = "1.5.0"
 cbc = { version = "0.1.2", optional = true }
 crc32fast = "1.5.0"
