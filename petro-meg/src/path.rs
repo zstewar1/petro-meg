@@ -5,9 +5,10 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::hash::Hash;
 use std::ops::{Deref, DerefMut};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 
+use ain::{AinChar, AinStr, AinString, AinStringFromError, AinValidationError, ain};
 use thiserror::Error;
 
 macro_rules! impl_path_cmp {
@@ -30,6 +31,23 @@ macro_rules! impl_path_cmp {
         }
     };
 }
+
+/// Creates a MegPath from a string literal, with validation checked at compile time.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! meg_path {
+    ($s:literal) => {
+        const {
+            match $crate::path::MegPath::from_str($s) {
+                Ok(path) => path,
+                Err(_) => panic!("string literal is not a valid MegPath"),
+            }
+        }
+    };
+}
+
+/// Creates a MegPath from a string literal, with validation checked at compile time.
+pub use meg_path as mp;
 
 /// Path length limit for Windows, which we also apply to MEGA paths, in some contexts.
 #[cfg(all(
@@ -69,64 +87,86 @@ pub(crate) const WIN_PATH_LIMIT: usize = 260;
 /// Because MegPaths are ASCII only, they can be safely converted to `&str`.
 #[derive(Eq)]
 #[repr(transparent)]
-pub struct MegPath([u8]);
+pub struct MegPath(AinStr);
 
 impl MegPath {
     /// An empty MegPath with no components.
     // SAFETY: Empty slice is a valid path.
-    pub const EMPTY: &'static MegPath = unsafe { Self::from_bytes_unchecked(&[]) };
+    pub const EMPTY: &'static MegPath = unsafe { Self::from_ain_str_unchecked(ain!("")) };
 
     /// Converts bytes to a MegPath without checking that it is a valid path.
     ///
     /// Caller must ensure that the path follows the rules described for MEGA file paths.
-    const unsafe fn from_bytes_unchecked<'a>(bytes: &'a [u8]) -> &'a Self {
+    const unsafe fn from_ain_str_unchecked<'a>(ain: &'a AinStr) -> &'a Self {
         // SAFETY: the layouts, lifetimes, and mutability are the same. Caller is responsible for
         // enforcing path validity.
-        unsafe { std::mem::transmute::<&'a [u8], &'a MegPath>(bytes) }
+        let ptr = ain as *const AinStr as *const MegPath;
+        unsafe { &*ptr }
     }
 
     /// Converts bytes to a mutable MegPath without checking that it is a valid path.
     ///
     /// Caller must ensure that the path follows the rules described for MEGA file paths.
-    unsafe fn from_bytes_unchecked_mut<'a>(bytes: &'a mut [u8]) -> &'a mut Self {
+    const unsafe fn from_ain_str_unchecked_mut<'a>(ain: &'a mut AinStr) -> &'a mut Self {
         // SAFETY: the layouts, lifetimes, and mutability are the same. Caller is responsible for
         // enforcing path validity.
-        unsafe { std::mem::transmute::<&'a mut [u8], &'a mut MegPath>(bytes) }
+        let ptr = ain as *mut AinStr as *mut MegPath;
+        unsafe { &mut *ptr }
+    }
+
+    /// Convert an [`&AinStr`][AinStr] to a MegPath.
+    pub const fn from_ain_str(ain: &AinStr) -> Result<&MegPath, MegPathError> {
+        if let Err(e) = validate_path(ain) {
+            return Err(e);
+        }
+        // SAFETY: we just checked that the path follows the rules.
+        Ok(unsafe { Self::from_ain_str_unchecked(ain) })
+    }
+
+    /// Convert an [`&AinStr`][AinStr] to a MegPath.
+    pub const fn from_ain_str_mut(ain: &mut AinStr) -> Result<&mut MegPath, MegPathError> {
+        if let Err(e) = validate_path(ain) {
+            return Err(e);
+        }
+        // SAFETY: we just checked that the path follows the rules.
+        Ok(unsafe { Self::from_ain_str_unchecked_mut(ain) })
     }
 
     /// Convert bytes to a MegPath.
-    pub fn from_bytes(bytes: &[u8]) -> Result<&MegPath, MegPathError> {
-        validate_path(bytes)?;
-        // SAFETY: we just checked that the path follows the rules.
-        Ok(unsafe { Self::from_bytes_unchecked(bytes) })
+    pub const fn from_bytes(bytes: &[u8]) -> Result<&MegPath, MegPathError> {
+        Self::from_ain_str(match AinStr::from_ascii(bytes) {
+            Ok(s) => s,
+            Err(_) => return Err(MegPathError::NotAscii),
+        })
     }
 
     /// Convert bytes to a mutable MegPath.
-    pub fn from_bytes_mut(bytes: &mut [u8]) -> Result<&mut MegPath, MegPathError> {
-        validate_path(bytes)?;
-        // SAFETY: we just checked that the path follows the rules.
-        Ok(unsafe { Self::from_bytes_unchecked_mut(bytes) })
+    pub const fn from_bytes_mut(bytes: &mut [u8]) -> Result<&mut MegPath, MegPathError> {
+        Self::from_ain_str_mut(match AinStr::from_ascii_mut(bytes) {
+            Ok(s) => s,
+            Err(_) => return Err(MegPathError::NotAscii),
+        })
     }
 
     /// Convert a string to a MegPath.
-    pub fn from_str(str: &str) -> Result<&MegPath, MegPathError> {
+    pub const fn from_str(str: &str) -> Result<&MegPath, MegPathError> {
         Self::from_bytes(str.as_bytes())
     }
 
     /// Convert a string to a MegPath.
-    pub fn from_str_mut(str: &mut str) -> Result<&mut MegPath, MegPathError> {
+    pub const fn from_str_mut(str: &mut str) -> Result<&mut MegPath, MegPathError> {
         // SAFETY: MegPath enforces that its contents are ASCII-7, so even when mutable it upholds
         // the invariant that the str is valid UTF-8.
         Self::from_bytes_mut(unsafe { str.as_bytes_mut() })
     }
 
     /// Length of the path in bytes.
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.0.len()
     }
 
     /// Returns true if this path is empty.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
@@ -134,23 +174,22 @@ impl MegPath {
     ///
     /// This always succeeds because 7-bit ascii is always safe to convert to str without further
     /// validation.
-    pub fn as_str(&self) -> &str {
-        // SAFETY: we require components to be ASCII-7, which is always valid UTF-8
-        unsafe { str::from_utf8_unchecked(&self.0) }
+    pub const fn as_str(&self) -> &str {
+        self.0.as_str()
     }
 
     /// Get the bytes of the path.
-    pub fn as_bytes(&self) -> &[u8] {
+    pub const fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+
+    /// Get this path as an [`&AinStr`][AinStr].
+    pub const fn as_ain_str(&self) -> &AinStr {
         &self.0
     }
 
-    /// Gets this [MegPath] as a [Path]
-    pub fn as_path(&self) -> &Path {
-        Path::new(self.as_str())
-    }
-
     /// Get an iterator over the [`Components`] of this [`MegPath`].
-    pub fn components(&self) -> Components<'_> {
+    pub const fn components(&self) -> Components<'_> {
         Components { path: &self.0 }
     }
 
@@ -158,20 +197,22 @@ impl MegPath {
     ///
     /// Since trailing slashes are not allowed and we don't allow drive letters, this is always Some
     /// unless the path is empty.
-    pub fn file_name(&self) -> Option<&Component> {
+    pub fn file_name(&self) -> Option<&AinStr> {
         if self.is_empty() {
             None
         } else {
             // Since our paths are restricted, this check is relatively easy.
-            let name_start = match self.0.iter().rposition(|&b| is_dir_separator(b)) {
+            let name_start = match self.0.rfind(is_dir_separator) {
                 Some(idx) => idx + 1,
                 None => 0,
             };
-            let slice = &self.0[name_start..];
-            // SAFETY: The MegPath is already validated and either it contained no dir separators or
-            // we sliced to only the content after the last dir separator.
-            Some(unsafe { Component::from_bytes_unchecked(slice) })
+            Some(&self.0[name_start..])
         }
+    }
+
+    /// Get the file extension, if any.
+    pub fn extension(&self) -> Option<&AinStr> {
+        self.file_name().and_then(stdutil::extension)
     }
 
     /// Creates a PathBuf with the components of this [`MegPath`].
@@ -188,7 +229,12 @@ impl MegPath {
     /// Makes this MegPath into a normalized path by converting to ASCII uppercase and switching any
     /// '/' separators for '\\'.
     pub const fn make_normalized(&mut self) {
-        make_normalized(&mut self.0)
+        let mut ain = self.0.as_mut_slice();
+        // Manual loop to allow this to be const-fn
+        while let [ch, rest @ ..] = ain {
+            *ch = to_normalized(*ch);
+            ain = rest;
+        }
     }
 }
 
@@ -203,19 +249,21 @@ impl Ord for MegPath {
 
 impl Hash for MegPath {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        hash_normalized(&self.0, state);
+        for component in self.components() {
+            component.hash(state);
+        }
+    }
+}
+
+impl AsRef<MegPath> for MegPath {
+    fn as_ref(&self) -> &MegPath {
+        self
     }
 }
 
 impl AsRef<str> for MegPath {
     fn as_ref(&self) -> &str {
         self.as_str()
-    }
-}
-
-impl AsRef<Path> for MegPath {
-    fn as_ref(&self) -> &Path {
-        self.as_path()
     }
 }
 
@@ -246,11 +294,11 @@ impl fmt::Display for MegPath {
 /// Components of a [`MegPath`].
 pub struct Components<'a> {
     /// Remaining MegPath to return components for.
-    path: &'a [u8],
+    path: &'a AinStr,
 }
 
 impl<'a> Iterator for Components<'a> {
-    type Item = &'a Component;
+    type Item = &'a AinStr;
 
     fn next(&mut self) -> Option<Self::Item> {
         // Since we don't allow trailing slashes, we don't need to worry about the normal 'split'
@@ -259,157 +307,65 @@ impl<'a> Iterator for Components<'a> {
         if self.path.is_empty() {
             return None;
         }
-        let (next, rest) = split_next_component_unchecked(self.path);
-        self.path = rest;
-        // SAFETY: Because the input was a valid path, this must be a valid component.
-        Some(unsafe { Component::from_bytes_unchecked(next) })
+        let next;
+        match self.path.find(is_dir_separator) {
+            Some(idx) => {
+                next = &self.path[..idx];
+                // idx must be less than len.
+                self.path = &self.path[idx + 1..];
+            }
+            None => {
+                next = self.path;
+                self.path = AinStr::empty();
+            }
+        }
+        Some(next)
     }
 }
 
 /// Checks that the given bytes satisfy the MEGA path rules specified on [`MegPath`].
 ///
 /// If this returns OK then it is safe to cast the bytes to a [`MegPath`].
-fn validate_path(bytes: &[u8]) -> Result<(), MegPathError> {
-    if bytes.is_empty() {
+const fn validate_path(ain: &AinStr) -> Result<(), MegPathError> {
+    if ain.is_empty() {
         return Ok(());
     }
-    let mut component_start = 0;
-    for (idx, &byte) in bytes.iter().enumerate() {
-        if !byte.is_ascii() {
-            return Err(MegPathError::NotAscii);
-        }
-        if is_dir_separator(byte) {
-            if idx == 0 {
-                return Err(MegPathError::LeadingSlash);
+    let mut ain = ain.as_slice();
+    // Pre-check that the first and last characters are not dir separators and that the end of the
+    // path is allowed at the end of a path component.
+    match ain {
+        [ch, ..] if is_dir_separator(*ch) => return Err(MegPathError::LeadingSlash),
+        [.., ch] if is_dir_separator(*ch) => return Err(MegPathError::TrailingSlash),
+        [.., ch] if !is_valid_component_end(*ch) => return Err(MegPathError::InvalidComponent),
+        _ => {}
+    }
+    loop {
+        match ain {
+            // If we ever encounter a character that's not a valid component nor a valid dir
+            // separator, that's an invalid character.
+            [ch, ..] if !is_valid_component(*ch) && !is_dir_separator(*ch) => {
+                return Err(MegPathError::InvalidCharacter);
             }
-            if idx == bytes.len() - 1 {
-                return Err(MegPathError::TrailingSlash);
-            }
-            if idx - component_start == 0 {
+            // Any time there are two sequential dir separators, that's an empty component.
+            [d1, d2, ..] if is_dir_separator(*d1) && is_dir_separator(*d2) => {
                 return Err(MegPathError::EmptyComponent);
             }
-            // this also implies that the component cannot be '.' or '..'.
-            if !is_valid_component_end(bytes[idx - 1]) {
+            // If the character just before a dir separator is not valid as a component end, that's
+            // an invalid component. This also blocks components consisting entirely of dots, such
+            // as '.' or '..'.
+            [c, d, ..] if is_dir_separator(*d) && !is_valid_component_end(*c) => {
                 return Err(MegPathError::InvalidComponent);
             }
-            component_start = idx + 1;
-        } else if !is_valid_component(byte) {
-            return Err(MegPathError::InvalidCharacter);
+            // Advance by one character if the current character doesn't break any rules.
+            [_, rest @ ..] => ain = rest,
+            [] => break,
         }
     }
     Ok(())
 }
 
-/// Splits bytes representing a MEGA file path at the next separator '/' or '\', without checking
-/// component produced is valid. Returns a tuple of (new component, remaining path)
-fn split_next_component_unchecked(path: &[u8]) -> (&[u8], &[u8]) {
-    let split_point = path.iter().copied().position(is_dir_separator);
-    match split_point {
-        // separator + 1 is safe because the separator was found at `separator`, so the next
-        // index must be no more than `path.len()`.
-        Some(separator) => (&path[..separator], &path[separator + 1..]),
-        None => (path, &[]),
-    }
-}
-
-/// A MEGA file path component. Must be 7-bit ASCII and not contain any slashes or characters which
-/// are invalid in windows path names.
-#[repr(transparent)]
-#[derive(Eq)]
-pub struct Component([u8]);
-
-impl Component {
-    /// Converts bytes to a Component without checking that it is a valid component name.
-    ///
-    /// Caller must ensure that the path follows the rules described for MEGA file paths.
-    unsafe fn from_bytes_unchecked<'a>(bytes: &'a [u8]) -> &'a Self {
-        debug_assert!(!bytes.is_empty(), "Components must not be empty");
-        // SAFETY: the layouts, lifetimes, and mutability are the same. Caller is responsible for
-        // enforcing path validity.
-        unsafe { std::mem::transmute::<&'a [u8], &'a Component>(bytes) }
-    }
-
-    /// Length of the component in bytes.
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Get a &str representation of the bytes.
-    ///
-    /// This always succeeds because 7-bit ascii is always safe to convert to str without further
-    /// validation.
-    pub fn as_str(&self) -> &str {
-        // SAFETY: we require components to be ASCII-7, which is always valid UTF-8
-        unsafe { str::from_utf8_unchecked(&self.0) }
-    }
-}
-
-impl PartialEq for Component {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.eq_ignore_ascii_case(&other.0)
-    }
-}
-
-impl PartialEq<str> for Component {
-    fn eq(&self, other: &str) -> bool {
-        self.0.eq_ignore_ascii_case(other.as_bytes())
-    }
-}
-
-impl PartialEq<Component> for str {
-    fn eq(&self, other: &Component) -> bool {
-        self.as_bytes().eq_ignore_ascii_case(&other.0)
-    }
-}
-
-impl Hash for Component {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        hash_normalized(&self.0, state);
-    }
-}
-
-impl PartialOrd for Component {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Component {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.0
-            .iter()
-            .map(u8::to_ascii_uppercase)
-            .cmp(other.0.iter().map(u8::to_ascii_uppercase))
-    }
-}
-
-impl AsRef<str> for Component {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl AsRef<MegPath> for Component {
-    fn as_ref(&self) -> &MegPath {
-        // SAFETY: A single path component is always a valid path.
-        unsafe { MegPath::from_bytes_unchecked(&self.0) }
-    }
-}
-
-impl fmt::Display for Component {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self.as_str(), f)
-    }
-}
-
-impl fmt::Debug for Component {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(self.as_str(), f)
-    }
-}
-
 /// Error for invalid conversions from str and bytes to [`MegPath`].
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum MegPathError {
     #[error("Path contained a non-ascii character")]
     NotAscii,
@@ -427,20 +383,39 @@ pub enum MegPathError {
     InvalidComponent,
 }
 
+impl From<AinValidationError> for MegPathError {
+    fn from(_: AinValidationError) -> Self {
+        Self::NotAscii
+    }
+}
+
+impl<T> From<AinStringFromError<T>> for MegPathError {
+    fn from(_: AinStringFromError<T>) -> Self {
+        Self::NotAscii
+    }
+}
+
 /// Owned container for a [`MegPath`], with the same validation requirements.
 #[derive(Default, Clone, Eq)]
-pub struct MegPathBuf(Vec<u8>);
+pub struct MegPathBuf(AinString);
 
 impl MegPathBuf {
     /// Creates a new empty [`MegPathBuf`].
-    pub fn new() -> Self {
-        Self(Vec::new())
+    pub const fn new() -> Self {
+        Self(AinString::new())
+    }
+
+    /// Convert an [`AinString`] to a MEGA path.
+    pub fn from_ain_string(ain: AinString) -> Result<Self, MegPathError> {
+        if let Err(e) = validate_path(ain.as_ain_str()) {
+            return Err(e);
+        }
+        Ok(Self(ain))
     }
 
     /// Convert a vector of bytes to a MEGA path.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, MegPathError> {
-        validate_path(&bytes)?;
-        Ok(Self(bytes))
+        Self::from_ain_string(AinString::from_ascii(bytes)?)
     }
 
     /// Convert a string into a MEGA path.
@@ -455,13 +430,17 @@ impl MegPathBuf {
 
     /// Extracts the underlying bytes.
     pub fn into_bytes(self) -> Vec<u8> {
-        self.0
+        self.0.into_bytes()
     }
 
     /// Extracts the contents as a string.
     pub fn into_string(self) -> String {
-        // SAFETY: Since we enforce that the content is ASCII-7, it must be valid UTF-8.
-        unsafe { String::from_utf8_unchecked(self.0) }
+        self.0.into_string()
+    }
+
+    /// Extracts the contents as an AinString.
+    pub fn into_ain_string(self) -> AinString {
+        self.0
     }
 }
 
@@ -493,14 +472,14 @@ impl Deref for MegPathBuf {
 
     fn deref(&self) -> &Self::Target {
         // SAFETY: the buffer enforces that paths remain valid.
-        unsafe { MegPath::from_bytes_unchecked(&self.0) }
+        unsafe { MegPath::from_ain_str_unchecked(&self.0) }
     }
 }
 
 impl DerefMut for MegPathBuf {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: the buffer enforces that paths remain valid.
-        unsafe { MegPath::from_bytes_unchecked_mut(&mut self.0) }
+        unsafe { MegPath::from_ain_str_unchecked_mut(&mut self.0) }
     }
 }
 
@@ -552,12 +531,6 @@ impl AsRef<str> for MegPathBuf {
     }
 }
 
-impl AsRef<Path> for MegPathBuf {
-    fn as_ref(&self) -> &Path {
-        self.as_path()
-    }
-}
-
 impl fmt::Debug for MegPathBuf {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(self.as_str(), f)
@@ -571,67 +544,134 @@ impl fmt::Display for MegPathBuf {
 }
 
 /// Check if the given ascii character is a valid directory separator.
-pub(crate) fn is_dir_separator(c: u8) -> bool {
-    c == b'/' || c == b'\\'
+pub(crate) const fn is_dir_separator(ch: AinChar) -> bool {
+    let b = ch.to_u8();
+    b == b'/' || b == b'\\'
 }
 
 /// Returns true if c is valid as the last character in a path component.
-fn is_valid_component_end(c: u8) -> bool {
-    is_valid_component(c) && c != b'.' && c != b' '
+const fn is_valid_component_end(ch: AinChar) -> bool {
+    is_valid_component(ch) && {
+        let b = ch.to_u8();
+        b != b'.' && b != b' '
+    }
 }
 
 /// Returns true if the character is valid for a path component.
-pub(crate) fn is_valid_component(c: u8) -> bool {
-    c.is_ascii()
-        && c > 31
-        && !is_dir_separator(c)
-        && c != b'<'
-        && c != b'>'
-        && c != b':'
-        && c != b'"'
-        && c != b'|'
-        && c != b'?'
-        && c != b'*'
+pub(crate) const fn is_valid_component(ch: AinChar) -> bool {
+    let b = ch.to_u8();
+    b > 31
+        && !is_dir_separator(ch)
+        && b != b'<'
+        && b != b'>'
+        && b != b':'
+        && b != b'"'
+        && b != b'|'
+        && b != b'?'
+        && b != b'*'
 }
 
 /// Return true if the characters are all valid within MEGA file paths (though not necessarily in
 /// their current positions).
 #[cfg(all(feature = "dynamic_version", feature = "reader"))]
 pub(crate) fn is_valid_path_chars(chars: &[u8]) -> bool {
-    chars
-        .iter()
-        .all(|&ch| is_dir_separator(ch) || is_valid_component(ch))
+    chars.iter().all(|&b| {
+        AinChar::from_u8(b).map_or(false, |ch| is_dir_separator(ch) || is_valid_component(ch))
+    })
 }
 
 /// Normalizes an ascii byte for the MEGA format by converting to uppercase and replacing '/' with
 /// '\\'.
-const fn to_normalized(b: u8) -> u8 {
-    if b == b'/' {
-        b'\\'
+pub(crate) const fn to_normalized(ch: AinChar) -> AinChar {
+    if ch.to_u8() == b'/' {
+        ain!('\\')
     } else {
-        b.to_ascii_uppercase()
+        ch.to_uppercase()
     }
 }
 
-/// Make a slice of bytes normalized in-place.
-const fn make_normalized(bytes: &mut [u8]) {
-    let mut idx = 0;
-    while idx < bytes.len() {
-        let byte = &mut bytes[idx];
-        *byte = to_normalized(*byte);
-        idx += 1;
+/// Utility functions which have been borrowed from the Rust standard libary, e.g. std::path under
+/// the terms of the MIT License and modified to work on MegPaths and components.
+mod stdutil {
+    use ain::{AinChar, AinStr, ain};
+
+    /// Copied from [std::path::Path::extension].
+    pub(super) fn extension(file_name: &AinStr) -> Option<&AinStr> {
+        let (before, after) = rsplit_file_at_dot(file_name);
+        before.and(after)
+    }
+
+    /// basic workhorse for splitting stem and extension
+    fn rsplit_file_at_dot(file: &AinStr) -> (Option<&AinStr>, Option<&AinStr>) {
+        // This check from 'std' is skipped, because MegPath does not allow relative components.
+        // if file == ain!("..") {
+        //     return (Some(file), None);
+        // }
+
+        let mut iter = file.rsplitn(2, |ch: AinChar| ch.to_u8() == b'.');
+        let after = iter.next();
+        let before = iter.next();
+        if before == Some(ain!("")) {
+            (Some(file), None)
+        } else {
+            (before, after)
+        }
     }
 }
 
-/// Hash the path with the given hasher, normalizing it to ascii uppercase and converting '/' to
-/// '\\'.
-pub(crate) fn hash_normalized<H: std::hash::Hasher>(bytes: &[u8], state: &mut H) {
-    const BLOCK_SIZE: usize = 0x100;
-    let mut buf = [0u8; BLOCK_SIZE];
-    for chunk in bytes.chunks(BLOCK_SIZE) {
-        let norm = &mut buf[..chunk.len()];
-        norm.copy_from_slice(chunk);
-        make_normalized(norm);
-        state.write(norm);
+#[cfg(test)]
+mod tests {
+use super::*;
+
+    #[test]
+    fn hashes_by_component() {
+        let same1 = mp!("a/path/with/Components");
+        let same2 = mp!("A\\path/with\\COMPONENTS");
+        let different1 = mp!("Apath/withCOMPONENTS");
+    }
+
+    #[test]
+    fn validation_succeeds() {
+        const CASES: &[&AinStr] = &[
+            ain!(""),
+            ain!("A/b"),
+            ain!("A\\b"),
+            ain!("has/.leading"),
+            ain!("has/.leading.ext"),
+            ain!("has/some.ext"),
+        ];
+        for case in CASES {
+            assert!(
+                validate_path(case).is_ok(),
+                "{case:?} unexpectedly fails validation"
+            );
+        }
+    }
+
+    #[test]
+    fn validation_fails() {
+        use MegPathError::*;
+        const CASES: &[(&AinStr, MegPathError)] = &[
+            (ain!("."), InvalidComponent),
+            (ain!(".."), InvalidComponent),
+            (ain!("/"), LeadingSlash),
+            (ain!("/leading"), LeadingSlash),
+            (ain!("/leading/with/multiple"), LeadingSlash),
+            (ain!("trailing/with\\multiple\\"), TrailingSlash),
+            (ain!("consecutive/\\slashes"), EmptyComponent),
+            (ain!("dot\\in\\filename."), InvalidComponent),
+            (ain!("dot/in/mid./filename"), InvalidComponent),
+            (ain!("relative/../component"), InvalidComponent),
+            (ain!("invalid\x03/characters"), InvalidCharacter),
+        ];
+        for (input, expected) in CASES {
+            match validate_path(input) {
+                Ok(()) => panic!("{input:?} unexpectedly passes validation"),
+                Err(e) => assert_eq!(
+                    e, *expected,
+                    "{input:?} produced unexpected error {e:?} instead of {expected:?}"
+                ),
+            }
+        }
     }
 }

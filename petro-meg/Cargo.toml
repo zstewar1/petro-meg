@@ -23,6 +23,7 @@ writer = []
 
 [dependencies]
 aes = { version = "0.8.4", optional = true }
+ain = { version = "0.2.0", git = "https://github.com/zstewar1/ain.git" }
 byteorder = "1.5.0"
 cbc = { version = "0.1.2", optional = true }
 crc32fast = "1.5.0"
